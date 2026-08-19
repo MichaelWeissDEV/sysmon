@@ -76,14 +76,18 @@ std::vector<DiskIOStats> DiskIOMonitor::read_linux() {
         if (it != previous_.end()) {
             double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
             if (dt > 0.0) {
-                ios.read_bytes_per_sec  = static_cast<double>(read_bytes    - it->second.read_bytes)  / dt;
-                ios.write_bytes_per_sec = static_cast<double>(written_bytes - it->second.write_bytes) / dt;
-                ios.read_ops_per_sec    = static_cast<double>(reads_completed  - it->second.read_ios)  / dt;
-                ios.write_ops_per_sec   = static_cast<double>(writes_completed - it->second.write_ios) / dt;
-                if (ios.read_bytes_per_sec  < 0) ios.read_bytes_per_sec  = 0;
-                if (ios.write_bytes_per_sec < 0) ios.write_bytes_per_sec = 0;
-                if (ios.read_ops_per_sec    < 0) ios.read_ops_per_sec    = 0;
-                if (ios.write_ops_per_sec   < 0) ios.write_ops_per_sec   = 0;
+                if (read_bytes >= it->second.read_bytes) {
+                    ios.read_bytes_per_sec = static_cast<double>(read_bytes - it->second.read_bytes) / dt;
+                }
+                if (written_bytes >= it->second.write_bytes) {
+                    ios.write_bytes_per_sec = static_cast<double>(written_bytes - it->second.write_bytes) / dt;
+                }
+                if (reads_completed >= it->second.read_ios) {
+                    ios.read_ops_per_sec = static_cast<double>(reads_completed - it->second.read_ios) / dt;
+                }
+                if (writes_completed >= it->second.write_ios) {
+                    ios.write_ops_per_sec = static_cast<double>(writes_completed - it->second.write_ios) / dt;
+                }
             }
         }
 
@@ -192,14 +196,18 @@ std::vector<DiskIOStats> DiskIOMonitor::read_macos() {
                 if (it != previous_.end()) {
                     double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
                     if (dt > 0.0) {
-                        ios.read_bytes_per_sec  = static_cast<double>(read_bytes - it->second.read_bytes) / dt;
-                        ios.write_bytes_per_sec = static_cast<double>(write_bytes - it->second.write_bytes) / dt;
-                        ios.read_ops_per_sec    = static_cast<double>(read_ops - it->second.read_ios) / dt;
-                        ios.write_ops_per_sec   = static_cast<double>(write_ops - it->second.write_ios) / dt;
-                        if (ios.read_bytes_per_sec < 0) ios.read_bytes_per_sec = 0;
-                        if (ios.write_bytes_per_sec < 0) ios.write_bytes_per_sec = 0;
-                        if (ios.read_ops_per_sec < 0) ios.read_ops_per_sec = 0;
-                        if (ios.write_ops_per_sec < 0) ios.write_ops_per_sec = 0;
+                        if (read_bytes >= it->second.read_bytes) {
+                            ios.read_bytes_per_sec = static_cast<double>(read_bytes - it->second.read_bytes) / dt;
+                        }
+                        if (write_bytes >= it->second.write_bytes) {
+                            ios.write_bytes_per_sec = static_cast<double>(write_bytes - it->second.write_bytes) / dt;
+                        }
+                        if (read_ops >= it->second.read_ios) {
+                            ios.read_ops_per_sec = static_cast<double>(read_ops - it->second.read_ios) / dt;
+                        }
+                        if (write_ops >= it->second.write_ios) {
+                            ios.write_ops_per_sec = static_cast<double>(write_ops - it->second.write_ios) / dt;
+                        }
                     }
                 }
 

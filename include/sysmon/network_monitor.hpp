@@ -12,6 +12,7 @@
 #include <map>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 
 /**
  * @brief Collects network interface statistics.
@@ -47,7 +48,7 @@ private:
     // Helpers
     std::string get_ip_address(const std::string& iface);
     std::string get_ip6_address(const std::string& iface);
-    uint64_t    get_link_speed(const std::string& iface);
+    std::optional<uint64_t> get_link_speed(const std::string& iface);
     bool        is_interface_up(const std::string& iface);
 };
 

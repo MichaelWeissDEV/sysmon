@@ -80,15 +80,19 @@ void TextRenderer::render_cpu(const CpuStats& s, const Config& cfg) {
         std::cout << "  usr/sys       " << std::fixed << std::setprecision(1) << s.user_percent
                   << " % / " << s.system_percent << " %\n";
     }
-    if (s.frequency_mhz > 0) {
-        std::cout << "  Frequency     " << std::fixed << std::setprecision(0) << s.frequency_mhz << " MHz";
-        if (s.max_frequency_mhz > 0) {
-            std::cout << " / " << std::fixed << std::setprecision(0) << s.max_frequency_mhz << " MHz max";
+    if (s.frequency_mhz.has_value()) {
+        std::cout << "  Frequency     " << std::fixed << std::setprecision(0) << s.frequency_mhz.value() << " MHz";
+        if (s.max_frequency_mhz.has_value()) {
+            std::cout << " / " << std::fixed << std::setprecision(0) << s.max_frequency_mhz.value() << " MHz max";
         }
         std::cout << "\n";
+    } else {
+        std::cout << "  Frequency     N/A\n";
     }
     if (s.temperature_celsius.has_value()) {
         std::cout << "  Temperature   " << std::fixed << std::setprecision(1) << s.temperature_celsius.value() << " °C\n";
+    } else {
+        std::cout << "  Temperature   N/A\n";
     }
 
     if (cfg.show_cpu_per_core && !s.per_core.empty()) {
@@ -96,8 +100,8 @@ void TextRenderer::render_cpu(const CpuStats& s, const Config& cfg) {
         for (const auto& c : s.per_core) {
             std::cout << "    Core " << std::setw(2) << c.id << ": "
                       << std::fixed << std::setprecision(1) << std::setw(5) << c.usage_percent << " %";
-            if (c.frequency_mhz > 0) {
-                std::cout << " (" << std::fixed << std::setprecision(0) << c.frequency_mhz << " MHz)";
+            if (c.frequency_mhz.has_value()) {
+                std::cout << " (" << std::fixed << std::setprecision(0) << c.frequency_mhz.value() << " MHz)";
             }
             std::cout << "\n";
         }
@@ -108,16 +112,30 @@ void TextRenderer::render_gpu(const std::vector<GpuStats>& gpus, const Config& c
     std::cout << "GPU / Graphics\n";
     for (const auto& g : gpus) {
         std::cout << "  " << g.name << " [" << g.vendor << "]\n";
-        if (g.gpu_cores > 0) {
-            std::cout << "    GPU Cores   " << g.gpu_cores << "\n";
+        if (g.gpu_cores.has_value()) {
+            std::cout << "    GPU Cores   " << g.gpu_cores.value() << "\n";
         }
-        if (g.usage_percent > 0) {
-            std::cout << "    Usage       " << std::fixed << std::setprecision(1) << g.usage_percent << " %\n";
+        if (g.usage_percent.has_value()) {
+            std::cout << "    Usage       " << std::fixed << std::setprecision(1) << g.usage_percent.value() << " %\n";
+        } else {
+            std::cout << "    Usage       N/A\n";
         }
-        if (cfg.show_gpu_memory && g.memory_total_bytes > 0) {
-            std::string label = g.memory_type.empty() ? "Memory" : g.memory_type + " Memory";
-            std::cout << "    " << label << "  " << format_bytes(g.memory_used_bytes) << " / " << format_bytes(g.memory_total_bytes)
-                      << " (" << std::fixed << std::setprecision(1) << g.memory_usage_percent << " %)\n";
+        if (cfg.show_gpu_memory && g.memory_total_bytes.has_value()) {
+            if (g.memory_used_bytes.has_value()) {
+                std::string label = g.memory_type.empty() ? "Memory" : g.memory_type + " Memory";
+                std::cout << "    " << label << "  " << format_bytes(g.memory_used_bytes.value())
+                          << " / " << format_bytes(g.memory_total_bytes.value())
+                          << " (" << std::fixed << std::setprecision(1)
+                          << g.memory_usage_percent.value_or(0.0) << " %)\n";
+            } else {
+                std::cout << "    Memory architecture: " << g.memory_type << "\n";
+                std::cout << "    System unified-memory capacity: "
+                          << format_bytes(g.memory_total_bytes.value()) << "\n";
+            }
+        }
+        if (g.frequency_mhz.has_value()) {
+            std::cout << "    Frequency   " << std::fixed << std::setprecision(0)
+                      << g.frequency_mhz.value() << " MHz\n";
         }
         if (g.temperature_celsius.has_value()) {
             std::cout << "    Temperature " << std::fixed << std::setprecision(1) << g.temperature_celsius.value() << " °C\n";
@@ -198,8 +216,10 @@ void TextRenderer::render_network(const std::vector<NetworkStats>& net, const Co
         }
         std::cout << "  ↓ " << std::right << std::setw(12) << format_bps(n.rx_bytes_per_sec)
                   << "  ↑ " << std::setw(12) << format_bps(n.tx_bytes_per_sec);
-        if (n.speed_mbps > 0) {
-            std::cout << "  [" << n.speed_mbps << " Mbps]";
+        if (n.speed_mbps.has_value()) {
+            std::cout << "  [" << n.speed_mbps.value() << " Mbps]";
+        } else {
+            std::cout << "  [link speed N/A]";
         }
         std::cout << "\n";
     }

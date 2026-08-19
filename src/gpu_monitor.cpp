@@ -10,7 +10,6 @@
 
 #if defined(SYSMON_MACOS)
 #  include <sys/sysctl.h>
-#  include <mach/mach.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -57,64 +56,33 @@ std::vector<GpuStats> GpuMonitor::read_apple() {
         gs.name = "Apple GPU";
     }
 
-    // GPU core count via sysctl (available on some macOS versions)
-    // Key: "hw.gpu.count" — not always present; fallback to known chip defaults
+    // GPU core count: only when a reliable runtime source provides it.
+    // The chip name alone does not identify the GPU configuration, so no
+    // hard-coded lookup table is used.  On current macOS releases there is
+    // no stable unprivileged sysctl for this, hence nullopt.
     int gpu_cores = 0;
     size_t gc_len = sizeof(gpu_cores);
     if (sysctlbyname("hw.gpu.count", &gpu_cores, &gc_len, nullptr, 0) == 0 && gpu_cores > 0) {
         gs.gpu_cores = static_cast<unsigned int>(gpu_cores);
-    } else {
-        // Heuristic: parse chip name for known configurations
-        std::string chip(brand);
-        if      (chip.find("M4 Max") != std::string::npos)  gs.gpu_cores = 40;
-        else if (chip.find("M4 Pro") != std::string::npos)  gs.gpu_cores = 20;
-        else if (chip.find("M4 Ultra") != std::string::npos) gs.gpu_cores = 80;
-        else if (chip.find("M4")     != std::string::npos)  gs.gpu_cores = 10;
-        else if (chip.find("M3 Max") != std::string::npos)  gs.gpu_cores = 40;
-        else if (chip.find("M3 Pro") != std::string::npos)  gs.gpu_cores = 18;
-        else if (chip.find("M3 Ultra") != std::string::npos) gs.gpu_cores = 76;
-        else if (chip.find("M3")     != std::string::npos)  gs.gpu_cores = 10;
-        else if (chip.find("M2 Max") != std::string::npos)  gs.gpu_cores = 38;
-        else if (chip.find("M2 Pro") != std::string::npos)  gs.gpu_cores = 19;
-        else if (chip.find("M2 Ultra") != std::string::npos) gs.gpu_cores = 76;
-        else if (chip.find("M2")     != std::string::npos)  gs.gpu_cores = 10;
-        else if (chip.find("M1 Max") != std::string::npos)  gs.gpu_cores = 32;
-        else if (chip.find("M1 Pro") != std::string::npos)  gs.gpu_cores = 16;
-        else if (chip.find("M1 Ultra") != std::string::npos) gs.gpu_cores = 64;
-        else if (chip.find("M1")     != std::string::npos)  gs.gpu_cores = 8;
     }
 
-    // Unified memory: total system RAM is shared between CPU and GPU
+    // Unified memory: the shared system capacity is legitimate to display
+    // as "system unified-memory capacity", but it must not be reported as
+    // GPU memory usage derived from whole-system VM statistics.
     int64_t total_ram = 0;
     size_t  ram_len   = sizeof(total_ram);
-    if (sysctlbyname("hw.memsize", &total_ram, &ram_len, nullptr, 0) == 0) {
+    if (sysctlbyname("hw.memsize", &total_ram, &ram_len, nullptr, 0) == 0 && total_ram > 0) {
         gs.memory_total_bytes = static_cast<uint64_t>(total_ram);
     }
 
-    // Memory usage: from vm_statistics (pages used by GPU are "wired" + compressed)
-    vm_size_t page_size = 0;
-    host_page_size(mach_host_self(), &page_size);
-
-    vm_statistics64_data_t vm;
-    mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
-    if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
-                          reinterpret_cast<host_info64_t>(&vm), &cnt) == KERN_SUCCESS) {
-        uint64_t ps = static_cast<uint64_t>(page_size);
-        gs.memory_used_bytes = vm.wire_count * ps + vm.compressor_page_count * ps;
-        gs.memory_free_bytes = vm.free_count  * ps;
-    }
-    if (gs.memory_total_bytes > 0) {
-        gs.memory_usage_percent = static_cast<double>(gs.memory_used_bytes) /
-                                  static_cast<double>(gs.memory_total_bytes) * 100.0;
-    }
-
-    // GPU usage: requires powermetrics (root) or IOKit SMC — return 0 with note
-    // A future version can shell out to `powermetrics --samplers gpu_power -n 1`
-    // and parse "GPU Active Residency" from its output.
-    gs.usage_percent = 0.0; // n/a without root
-
-    // GPU frequency: not easily available without IOKit/powermetrics
-    gs.frequency_mhz = 0.0;
+    // GPU usage/frequency require an unprivileged measurement source that is
+    // not stable across macOS releases.  They are intentionally unavailable
+    // instead of being reported as 0.
+    gs.usage_percent     = std::nullopt;
+    gs.frequency_mhz     = std::nullopt;
+    gs.memory_used_bytes = std::nullopt;
+    gs.memory_free_bytes = std::nullopt;
+    gs.memory_usage_percent = std::nullopt;
 
     return {gs};
 }

@@ -17,6 +17,7 @@
 #include "sysmon/config.hpp"
 #include "sysmon/tui.hpp"
 #include "sysmon/text_renderer.hpp"
+#include "sysmon/version.hpp"
 
 #include <iostream>
 #include <string>
@@ -29,7 +30,7 @@
 #include <fcntl.h>
 #include <memory>
 
-static constexpr const char* VERSION = "0.2.0";
+static constexpr const char* VERSION = SYSMON_VERSION;
 
 // ---------------------------------------------------------------------------
 // Signal / keyboard handling
@@ -99,7 +100,7 @@ int main(int argc, char* argv[]) {
                       << "  --disk / --no-disk     Show / hide storage & disk I/O\n\n"
                       << "Configuration:\n"
                       << "  --config PATH          Load configuration from PATH\n"
-                      << "  --generate-config      Write default config to ~/.config/sysmon/sysmon.conf\n"
+                      << "  --generate-config      Write default config to the config file location\n"
                       << "  --show-config          Print currently active configuration and exit\n"
                       << "  --version, -v          Show version information\n\n"
                       << "Interactive Hotkeys (TUI Mode):\n"

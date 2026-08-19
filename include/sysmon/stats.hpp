@@ -41,7 +41,7 @@ struct CoreStats {
     double       system_percent{0.0};
     double       iowait_percent{0.0};
     double       idle_percent{0.0};
-    double       frequency_mhz{0.0};
+    std::optional<double> frequency_mhz;      ///< nullopt if not measurable
     std::optional<double> temperature_celsius;
 };
 
@@ -55,8 +55,8 @@ struct CpuStats {
     double       system_percent{0.0};
     double       iowait_percent{0.0};
     double       idle_percent{0.0};
-    double       frequency_mhz{0.0};
-    double       max_frequency_mhz{0.0};
+    std::optional<double> frequency_mhz;      ///< nullopt if not measurable
+    std::optional<double> max_frequency_mhz;  ///< nullopt if not measurable
     std::optional<double> temperature_celsius;
     std::vector<CoreStats> per_core;
 };
@@ -86,17 +86,17 @@ struct MemoryStats {
 struct GpuStats {
     std::string  name;                       ///< e.g. "Apple GPU", "RTX 4090"
     std::string  vendor;                     ///< "Apple", "NVIDIA", "AMD", "Intel"
-    unsigned int gpu_cores{0};              ///< Shader / compute cores
-    std::string  memory_type;               ///< "Unified", "GDDR6X", "HBM2e", …
-    uint64_t     memory_total_bytes{0};
-    uint64_t     memory_used_bytes{0};
-    uint64_t     memory_free_bytes{0};
-    double       usage_percent{0.0};        ///< Overall GPU utilization [0..100]
-    double       memory_usage_percent{0.0};
-    double       frequency_mhz{0.0};        ///< Core clock
-    double       memory_frequency_mhz{0.0}; ///< Memory clock
-    double       encoder_percent{0.0};
-    double       decoder_percent{0.0};
+    std::optional<unsigned int> gpu_cores;   ///< Shader / compute cores
+    std::string  memory_type;                ///< "Unified", "GDDR6X", "HBM2e", …
+    std::optional<uint64_t> memory_total_bytes;
+    std::optional<uint64_t> memory_used_bytes;
+    std::optional<uint64_t> memory_free_bytes;
+    std::optional<double> usage_percent;        ///< Overall GPU utilization [0..100]
+    std::optional<double> memory_usage_percent;
+    std::optional<double> frequency_mhz;        ///< Core clock
+    std::optional<double> memory_frequency_mhz; ///< Memory clock
+    std::optional<double> encoder_percent;
+    std::optional<double> decoder_percent;
     std::optional<double> temperature_celsius;
     std::optional<double> power_watts;
 };
@@ -157,7 +157,7 @@ struct NetworkStats {
     std::string  ip_address;
     std::string  ip6_address;
     bool         is_up{false};
-    uint64_t     speed_mbps{0};
+    std::optional<uint64_t> speed_mbps;   ///< nullopt if not measurable
 };
 
 /** @brief A single TCP/UDP connection. */

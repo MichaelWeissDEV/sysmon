@@ -32,7 +32,7 @@ public:
      */
     CpuStats read();
 
-private:
+    /** @brief Per-CPU time counter snapshot. */
     struct CpuTimes {
         unsigned long long user{0};
         unsigned long long nice{0};
@@ -44,6 +44,19 @@ private:
         unsigned long long steal{0};
     };
 
+    /**
+     * @brief Compute usage percentage from two successive time snapshots.
+     *
+     * Always returns a value clamped to [0, 100].  Counter resets or wraps
+     * yield 0.0 rather than a bogus value.
+     */
+    static double usage_from_delta(const CpuTimes& a, const CpuTimes& b,
+                                   double* user_pct = nullptr,
+                                   double* sys_pct = nullptr,
+                                   double* iowait_pct = nullptr,
+                                   double* idle_pct = nullptr);
+
+private:
     std::vector<CpuTimes>      prev_times_;  ///< Previous per-core times
     CpuTimes                   prev_total_;  ///< Previous aggregate times
     std::chrono::steady_clock::time_point prev_ts_;
@@ -61,10 +74,6 @@ private:
     std::optional<unsigned int> get_physical_cores();
     std::optional<double>       get_cpu_frequency();
     std::optional<double>       get_max_frequency();
-
-    double usage_from_delta(const CpuTimes& a, const CpuTimes& b, double* user_pct = nullptr,
-                             double* sys_pct = nullptr, double* iowait_pct = nullptr,
-                             double* idle_pct = nullptr);
 };
 
 #endif // SYSMON_CPU_MONITOR_HPP

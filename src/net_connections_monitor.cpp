@@ -234,102 +234,29 @@ std::vector<NetConnectionStats> NetConnectionsMonitor::read_linux(bool, unsigned
 std::vector<NetConnectionStats> NetConnectionsMonitor::read_macos(bool include_listen, unsigned int limit) {
     std::vector<NetConnectionStats> result;
 
-    // Use netstat -anv -p tcp (fast, numeric only, includes process:pid)
-    FILE* pipe = popen("netstat -anv -p tcp 2>/dev/null", "r");
-    if (!pipe) return result;
-
-    char buffer[1024];
-    bool header_passed = false;
-
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        std::string line(buffer);
-        if (line.find("Proto") != std::string::npos || line.find("Active") != std::string::npos) {
-            header_passed = true;
-            continue;
+    auto run_netstat = [](const char* proto) -> std::string {
+        // Fixed command; never built from user input.
+        std::string cmd = std::string("netstat -anv -p ") + proto + " 2>/dev/null";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) return {};
+        std::string out;
+        char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            out += buffer;
         }
-        if (!header_passed) continue;
+        pclose(pipe);
+        return out;
+    };
 
-        auto tokens = utils::split(line, ' ');
-        tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
-                     [](const std::string& s) { return s.empty(); }), tokens.end());
+    std::string tcp_out = run_netstat("tcp");
+    std::string udp_out = run_netstat("udp");
 
-        // Typical tokens:
-        // [0] Proto (tcp4/tcp6)
-        // [1] Recv-Q
-        // [2] Send-Q
-        // [3] Local Address (e.g. 192.168.0.4.50162)
-        // [4] Foreign Address (e.g. 18.97.36.61.443)
-        // [5] (state) (e.g. ESTABLISHED, LISTEN, SYN_SENT)
-        // [6] rxbytes
-        // [7] txbytes
-        // [8] rhiwat
-        // [9] shiwat
-        // [10] process:pid (or if process name has spaces, remaining tokens before options)
-        if (tokens.size() < 6) continue;
+    auto tcp = parse_macos_netstat_tcp(tcp_out, include_listen);
+    auto udp = parse_macos_netstat_udp(udp_out, include_listen);
 
-        std::string proto = tokens[0];
-        std::string local = tokens[3];
-        std::string foreign = tokens[4];
-        std::string state = tokens[5];
-
-        if (!include_listen && (state == "LISTEN" || state == "CLOSED")) continue;
-
-        auto lpos = local.rfind('.');
-        std::string laddr = (lpos != std::string::npos) ? local.substr(0, lpos) : local;
-        uint16_t lport = 0;
-        if (lpos != std::string::npos) {
-            try { lport = static_cast<uint16_t>(std::stoi(local.substr(lpos + 1))); } catch (...) {}
-        }
-
-        auto rpos = foreign.rfind('.');
-        std::string raddr = (rpos != std::string::npos) ? foreign.substr(0, rpos) : foreign;
-        uint16_t rport = 0;
-        if (rpos != std::string::npos) {
-            try { rport = static_cast<uint16_t>(std::stoi(foreign.substr(rpos + 1))); } catch (...) {}
-        }
-
-        NetConnectionStats conn;
-        conn.protocol = proto;
-        conn.local_addr = laddr;
-        conn.local_port = lport;
-        conn.remote_addr = raddr;
-        conn.remote_port = rport;
-        conn.state = state;
-
-        if (tokens.size() > 7) {
-            try { conn.rx_bytes = std::stoull(tokens[6]); } catch (...) {}
-            try { conn.tx_bytes = std::stoull(tokens[7]); } catch (...) {}
-        }
-
-        // Look for process:pid token (contains colon ':')
-        for (size_t i = 8; i < tokens.size(); ++i) {
-            auto colon = tokens[i].rfind(':');
-            if (colon != std::string::npos && colon + 1 < tokens[i].size()) {
-                std::string pid_part = tokens[i].substr(colon + 1);
-                if (std::isdigit(pid_part[0])) {
-                    try {
-                        conn.pid = std::stoi(pid_part);
-                        // The process name might span tokens from 10 up to here
-                        std::string pname;
-                        for (size_t p = 10; p < i; ++p) {
-                            if (!pname.empty()) pname += " ";
-                            pname += tokens[p];
-                        }
-                        if (!pname.empty()) {
-                            pname += " " + tokens[i].substr(0, colon);
-                        } else {
-                            pname = tokens[i].substr(0, colon);
-                        }
-                        conn.process_name = pname;
-                    } catch (...) {}
-                    break;
-                }
-            }
-        }
-
-        result.push_back(conn);
-    }
-    pclose(pipe);
+    result.reserve(tcp.size() + udp.size());
+    result.insert(result.end(), tcp.begin(), tcp.end());
+    result.insert(result.end(), udp.begin(), udp.end());
 
     std::sort(result.begin(), result.end(), [](const NetConnectionStats& a, const NetConnectionStats& b) {
         if (a.state != b.state) {
@@ -343,6 +270,149 @@ std::vector<NetConnectionStats> NetConnectionsMonitor::read_macos(bool include_l
 
     if (limit > 0 && result.size() > limit) {
         result.resize(limit);
+    }
+
+    return result;
+}
+
+// Parses the `process:pid` token that may span multiple whitespace tokens
+// when the process name contains spaces (e.g. "Code Helper (Plu:14454").
+static void parse_macos_process_token(const std::vector<std::string>& tokens,
+                                      size_t start,
+                                      NetConnectionStats& conn) {
+    for (size_t i = start; i < tokens.size(); ++i) {
+        auto colon = tokens[i].rfind(':');
+        if (colon == std::string::npos || colon + 1 >= tokens[i].size()) continue;
+
+        std::string pid_part = tokens[i].substr(colon + 1);
+        bool all_digits = !pid_part.empty() &&
+                          std::all_of(pid_part.begin(), pid_part.end(),
+                                      [](unsigned char c) { return std::isdigit(c) != 0; });
+        if (!all_digits) continue;
+
+        try {
+            conn.pid = std::stoi(pid_part);
+        } catch (...) {
+            break;
+        }
+
+        std::string name;
+        for (size_t p = start; p < i; ++p) {
+            if (!name.empty()) name += " ";
+            name += tokens[p];
+        }
+        if (!name.empty()) name += " ";
+        name += tokens[i].substr(0, colon);
+        conn.process_name = name;
+        return;
+    }
+}
+
+void NetConnectionsMonitor::parse_address_port(const std::string& addrport,
+                                               std::string& addr, uint16_t& port) {
+    addr  = addrport;
+    port  = 0;
+    auto pos = addrport.rfind('.');
+    if (pos == std::string::npos) return;
+    addr = addrport.substr(0, pos);
+    try {
+        port = static_cast<uint16_t>(std::stoi(addrport.substr(pos + 1)));
+    } catch (...) {
+        addr = addrport;
+        port = 0;
+    }
+}
+
+std::vector<NetConnectionStats> NetConnectionsMonitor::parse_macos_netstat_tcp(const std::string& output,
+                                                                               bool include_listen) {
+    std::vector<NetConnectionStats> result;
+    std::istringstream iss(output);
+    std::string line;
+    bool header_passed = false;
+
+    // netstat -anv -p tcp columns (whitespace-split):
+    // 0 Proto  1 Recv-Q  2 Send-Q  3 Local Address  4 Foreign Address  5 (state)
+    // 6 rxbytes  7 txbytes  8 rhiwat  9 shiwat  10+ process:pid  11+ state/options/...
+    while (std::getline(iss, line)) {
+        if (line.find("Proto") != std::string::npos || line.find("Active") != std::string::npos) {
+            header_passed = true;
+            continue;
+        }
+        if (!header_passed) continue;
+
+        auto tokens = utils::split(line, ' ');
+        tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                     [](const std::string& s) { return s.empty(); }), tokens.end());
+        if (tokens.size() < 6) continue;
+
+        std::string proto  = tokens[0];
+        std::string state  = tokens[5];
+        if (!include_listen && (state == "LISTEN" || state == "CLOSED")) continue;
+
+        NetConnectionStats conn;
+        conn.protocol = proto;
+        conn.state    = state;
+        parse_address_port(tokens[3], conn.local_addr, conn.local_port);
+        parse_address_port(tokens[4], conn.remote_addr, conn.remote_port);
+
+        if (tokens.size() > 7) {
+            try { conn.rx_bytes = std::stoull(tokens[6]); } catch (...) {}
+            try { conn.tx_bytes = std::stoull(tokens[7]); } catch (...) {}
+        }
+
+        // process:pid starts after shiwat (index 9).  If a malformed or
+        // unexpected line is encountered, PID/process remain N/A.
+        if (tokens.size() > 10) {
+            parse_macos_process_token(tokens, 10, conn);
+        }
+
+        result.push_back(conn);
+    }
+
+    return result;
+}
+
+std::vector<NetConnectionStats> NetConnectionsMonitor::parse_macos_netstat_udp(const std::string& output,
+                                                                               bool include_listen) {
+    std::vector<NetConnectionStats> result;
+    std::istringstream iss(output);
+    std::string line;
+    bool header_passed = false;
+
+    // netstat -anv -p udp columns (whitespace-split): there is no state column.
+    // 0 Proto  1 Recv-Q  2 Send-Q  3 Local Address  4 Foreign Address
+    // 5 rxbytes  6 txbytes  7 rhiwat  8 shiwat  9+ process:pid  10+ state/options/...
+    while (std::getline(iss, line)) {
+        if (line.find("Proto") != std::string::npos || line.find("Active") != std::string::npos) {
+            header_passed = true;
+            continue;
+        }
+        if (!header_passed) continue;
+
+        auto tokens = utils::split(line, ' ');
+        tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                     [](const std::string& s) { return s.empty(); }), tokens.end());
+        if (tokens.size() < 5) continue;
+
+        NetConnectionStats conn;
+        conn.protocol = tokens[0];
+        conn.state    = "UNCONN";
+        if (!include_listen) continue;
+
+        parse_address_port(tokens[3], conn.local_addr, conn.local_port);
+        parse_address_port(tokens[4], conn.remote_addr, conn.remote_port);
+
+        if (tokens.size() > 7) {
+            try { conn.rx_bytes = std::stoull(tokens[5]); } catch (...) {}
+            try { conn.tx_bytes = std::stoull(tokens[6]); } catch (...) {}
+        }
+
+        // process:pid starts after shiwat (index 8).
+        if (tokens.size() > 9) {
+            parse_macos_process_token(tokens, 9, conn);
+        }
+
+        result.push_back(conn);
     }
 
     return result;

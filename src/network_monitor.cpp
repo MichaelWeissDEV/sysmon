@@ -109,10 +109,12 @@ std::vector<NetworkStats> NetworkMonitor::read_linux() {
         if (it != previous_snapshots_.end()) {
             double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
             if (dt > 0.0) {
-                ns.rx_bytes_per_sec = static_cast<double>(rx_bytes  - it->second.rx_bytes)  / dt;
-                ns.tx_bytes_per_sec = static_cast<double>(tx_bytes  - it->second.tx_bytes)  / dt;
-                if (ns.rx_bytes_per_sec < 0) ns.rx_bytes_per_sec = 0;
-                if (ns.tx_bytes_per_sec < 0) ns.tx_bytes_per_sec = 0;
+                if (rx_bytes >= it->second.rx_bytes) {
+                    ns.rx_bytes_per_sec = static_cast<double>(rx_bytes - it->second.rx_bytes) / dt;
+                }
+                if (tx_bytes >= it->second.tx_bytes) {
+                    ns.tx_bytes_per_sec = static_cast<double>(tx_bytes - it->second.tx_bytes) / dt;
+                }
             }
         }
 
@@ -203,10 +205,12 @@ std::vector<NetworkStats> NetworkMonitor::read_macos() {
         if (it != previous_snapshots_.end()) {
             double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
             if (dt > 0.0) {
-                ns.rx_bytes_per_sec = static_cast<double>(ns.rx_bytes_total - it->second.rx_bytes) / dt;
-                ns.tx_bytes_per_sec = static_cast<double>(ns.tx_bytes_total - it->second.tx_bytes) / dt;
-                if (ns.rx_bytes_per_sec < 0) ns.rx_bytes_per_sec = 0;
-                if (ns.tx_bytes_per_sec < 0) ns.tx_bytes_per_sec = 0;
+                if (ns.rx_bytes_total >= it->second.rx_bytes) {
+                    ns.rx_bytes_per_sec = static_cast<double>(ns.rx_bytes_total - it->second.rx_bytes) / dt;
+                }
+                if (ns.tx_bytes_total >= it->second.tx_bytes) {
+                    ns.tx_bytes_per_sec = static_cast<double>(ns.tx_bytes_total - it->second.tx_bytes) / dt;
+                }
             }
         }
 
@@ -303,7 +307,7 @@ std::string NetworkMonitor::get_ip6_address(const std::string& iface) {
 #endif
 }
 
-uint64_t NetworkMonitor::get_link_speed(const std::string& iface) {
+std::optional<uint64_t> NetworkMonitor::get_link_speed(const std::string& iface) {
 #if defined(SYSMON_LINUX)
     auto speed_file = utils::read_file("/sys/class/net/" + iface + "/speed");
     if (speed_file.has_value()) {
@@ -313,9 +317,11 @@ uint64_t NetworkMonitor::get_link_speed(const std::string& iface) {
         } catch (...) {}
     }
 #else
+    // No reliable unprivileged link-speed source on macOS; report N/A
+    // instead of a fabricated value.
     (void)iface;
 #endif
-    return 0;
+    return std::nullopt;
 }
 
 bool NetworkMonitor::is_interface_up(const std::string& iface) {

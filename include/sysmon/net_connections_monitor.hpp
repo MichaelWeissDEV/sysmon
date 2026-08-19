@@ -32,6 +32,21 @@ public:
     std::vector<NetConnectionStats> read(bool include_listen = false,
                                           unsigned int limit = 100);
 
+    // Pure parsers for `netstat -anv -p tcp` / `netstat -anv -p udp` output.
+    // These are platform-independent so they can be exercised with fixtures.
+    static std::vector<NetConnectionStats> parse_macos_netstat_tcp(const std::string& output,
+                                                                   bool include_listen);
+    static std::vector<NetConnectionStats> parse_macos_netstat_udp(const std::string& output,
+                                                                   bool include_listen);
+
+    // Helpers
+    static std::string hex_to_ip4(const std::string& hex);
+    static std::string hex_to_ip6(const std::string& hex);
+    static uint16_t    hex_to_port(const std::string& hex);
+    static std::string tcp_state_name(int code);
+    static void        parse_address_port(const std::string& addrport,
+                                          std::string& addr, uint16_t& port);
+
 private:
     // inode → pid cache
     std::map<uint64_t, int> inode_pid_map_;
@@ -41,12 +56,6 @@ private:
 
     std::vector<NetConnectionStats> read_linux(bool include_listen, unsigned int limit);
     std::vector<NetConnectionStats> read_macos(bool include_listen, unsigned int limit);
-
-    // Helpers
-    static std::string hex_to_ip4(const std::string& hex);
-    static std::string hex_to_ip6(const std::string& hex);
-    static uint16_t    hex_to_port(const std::string& hex);
-    static std::string tcp_state_name(int code);
 };
 
 #endif // SYSMON_NET_CONNECTIONS_MONITOR_HPP

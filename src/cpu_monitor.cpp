@@ -28,7 +28,7 @@ CpuStats CpuMonitor::read() {
     stats.model          = get_cpu_model().value_or("unknown");
     stats.logical_cores  = get_logical_cores().value_or(0);
     stats.physical_cores = get_physical_cores().value_or(0);
-    stats.max_frequency_mhz = get_max_frequency().value_or(0.0);
+    stats.max_frequency_mhz = get_max_frequency();
 
     auto now = std::chrono::steady_clock::now();
 
@@ -41,13 +41,6 @@ CpuStats CpuMonitor::read() {
 #endif
 
     if (!first_read_ && !cur_times.empty() && !prev_times_.empty()) {
-        // Aggregate total
-        if (cur_times.size() > prev_times_.size()) {
-            // Use the "cpu" aggregate row which is index 0 on Linux
-        }
-        // Overall usage from aggregate (index 0 on Linux is total, else compute)
-        double user_pct = 0, sys_pct = 0, iowait_pct = 0, idle_pct = 0;
-
         // Aggregate totals: sum all cores
         CpuTimes agg_cur{}, agg_prev{};
         for (size_t i = 0; i < cur_times.size(); ++i) {
@@ -71,6 +64,7 @@ CpuStats CpuMonitor::read() {
             agg_prev.steal   += prev_times_[i].steal;
         }
 
+        double user_pct = 0, sys_pct = 0, iowait_pct = 0, idle_pct = 0;
         stats.usage_percent = usage_from_delta(agg_prev, agg_cur,
                                                &user_pct, &sys_pct, &iowait_pct, &idle_pct);
         stats.user_percent   = user_pct;
@@ -94,7 +88,7 @@ CpuStats CpuMonitor::read() {
     first_read_ = false;
 
     // Frequency
-    stats.frequency_mhz = get_cpu_frequency().value_or(0.0);
+    stats.frequency_mhz = get_cpu_frequency();
 
     // Per-core frequencies (best effort)
 #if defined(SYSMON_LINUX)
@@ -108,6 +102,10 @@ CpuStats CpuMonitor::read() {
                 stats.per_core[i].frequency_mhz = std::stod(f.value()) / 1000.0;
             } catch (...) {}
         }
+    }
+#elif defined(SYSMON_MACOS)
+    for (auto& core : stats.per_core) {
+        core.frequency_mhz = stats.frequency_mhz;
     }
 #endif
 
@@ -207,6 +205,15 @@ double CpuMonitor::usage_from_delta(const CpuTimes& a, const CpuTimes& b,
     auto total_a = a.user + a.nice + a.system + a.idle + a.iowait + a.irq + a.softirq + a.steal;
     auto total_b = b.user + b.nice + b.system + b.idle + b.iowait + b.irq + b.softirq + b.steal;
 
+    // Counter reset / wrap between samples: treat as no useful delta.
+    if (total_b < total_a) {
+        if (user_pct)   *user_pct   = 0;
+        if (sys_pct)    *sys_pct    = 0;
+        if (iowait_pct) *iowait_pct = 0;
+        if (idle_pct)   *idle_pct   = 100.0;
+        return 0.0;
+    }
+
     auto delta_total = static_cast<double>(total_b) - static_cast<double>(total_a);
     if (delta_total <= 0) {
         if (user_pct)   *user_pct   = 0;
@@ -222,13 +229,17 @@ double CpuMonitor::usage_from_delta(const CpuTimes& a, const CpuTimes& b,
                           static_cast<double>(a.system + a.irq + a.softirq);
     double delta_iowait = static_cast<double>(b.iowait) - static_cast<double>(a.iowait);
 
-    if (user_pct)   *user_pct   = std::max(0.0, delta_user   / delta_total * 100.0);
-    if (sys_pct)    *sys_pct    = std::max(0.0, delta_sys    / delta_total * 100.0);
-    if (iowait_pct) *iowait_pct = std::max(0.0, delta_iowait / delta_total * 100.0);
-    if (idle_pct)   *idle_pct   = std::max(0.0, delta_idle   / delta_total * 100.0);
+    auto clamp_pct = [](double v) {
+        return std::max(0.0, std::min(100.0, v));
+    };
+
+    if (user_pct)   *user_pct   = clamp_pct(delta_user   / delta_total * 100.0);
+    if (sys_pct)    *sys_pct    = clamp_pct(delta_sys    / delta_total * 100.0);
+    if (iowait_pct) *iowait_pct = clamp_pct(delta_iowait / delta_total * 100.0);
+    if (idle_pct)   *idle_pct   = clamp_pct(delta_idle   / delta_total * 100.0);
 
     double usage = 100.0 * (1.0 - delta_idle / delta_total);
-    return std::round(std::max(0.0, std::min(100.0, usage)) * 10.0) / 10.0;
+    return std::round(clamp_pct(usage) * 10.0) / 10.0;
 }
 
 std::optional<std::string> CpuMonitor::get_cpu_model() {
@@ -341,13 +352,18 @@ std::optional<double> CpuMonitor::get_cpu_frequency() {
     }
     return std::nullopt;
 #elif defined(SYSMON_MACOS)
+    // Only report a frequency when a real sysctl value is available.
+    // Apple Silicon does not reliably expose a current CPU frequency;
+    // in that case this returns nullopt and the UI shows N/A.
     uint64_t freq = 0;
     size_t len = sizeof(freq);
-    if (sysctlbyname("hw.cpufrequency", &freq, &len, nullptr, 0) == 0) {
+    if (sysctlbyname("hw.cpufrequency", &freq, &len, nullptr, 0) == 0 && freq > 0) {
         return static_cast<double>(freq) / 1e6;
     }
-    // Apple Silicon: use hw.tbfrequency as fallback
-    if (sysctlbyname("hw.cpufrequency_max", &freq, &len, nullptr, 0) == 0) {
+    if (sysctlbyname("hw.cpufrequency_max", &freq, &len, nullptr, 0) == 0 && freq > 0) {
+        return static_cast<double>(freq) / 1e6;
+    }
+    if (sysctlbyname("hw.cpufrequency_min", &freq, &len, nullptr, 0) == 0 && freq > 0) {
         return static_cast<double>(freq) / 1e6;
     }
     return std::nullopt;
@@ -366,7 +382,7 @@ std::optional<double> CpuMonitor::get_max_frequency() {
 #elif defined(SYSMON_MACOS)
     uint64_t freq = 0;
     size_t len = sizeof(freq);
-    if (sysctlbyname("hw.cpufrequency_max", &freq, &len, nullptr, 0) == 0) {
+    if (sysctlbyname("hw.cpufrequency_max", &freq, &len, nullptr, 0) == 0 && freq > 0) {
         return static_cast<double>(freq) / 1e6;
     }
     return std::nullopt;

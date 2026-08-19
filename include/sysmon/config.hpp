@@ -3,7 +3,8 @@
  * @brief sysmon configuration system.
  *
  * Loads / saves a simple INI-style config file at
- * ~/.config/sysmon/sysmon.conf.  No external library dependencies.
+ * $XDG_CONFIG_HOME/sysmon/sysmon.conf (falling back to
+ * ~/.config/sysmon/sysmon.conf).  No external library dependencies.
  */
 
 #ifndef SYSMON_CONFIG_HPP
@@ -19,7 +20,7 @@
  * @brief All configurable sysmon settings.
  *
  * Sensible defaults are provided for every field.  Users can override by
- * editing ~/.config/sysmon/sysmon.conf or via CLI flags.
+ * editing $XDG_CONFIG_HOME/sysmon/sysmon.conf (or ~/.config/...) or via CLI flags.
  */
 struct Config {
 
@@ -84,7 +85,7 @@ struct Config {
     // Methods
     // ------------------------------------------------------------------
 
-    /** @brief Return the default config file path (~/.config/sysmon/sysmon.conf). */
+    /** @brief Return the default config file path (XDG/HOME based). */
     static std::string default_config_path();
 
     /** @brief Load config from disk; returns defaults if file missing. */

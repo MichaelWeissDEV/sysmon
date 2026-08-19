@@ -107,7 +107,7 @@ MemoryStats MemoryMonitor::read() {
 }
 
 std::optional<uint64_t> MemoryMonitor::parse_meminfo_value(const std::string& key,
-                                                             const std::string& data) {
+                                                              const std::string& data) {
     std::istringstream iss(data);
     std::string line;
     while (std::getline(iss, line)) {

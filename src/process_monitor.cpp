@@ -44,7 +44,8 @@ std::vector<ProcessStats> ProcessMonitor::read_linux(unsigned int limit) {
     long hz     = sysconf(_SC_CLK_TCK);
     long page_s = sysconf(_SC_PAGE_SIZE);
 
-    // Read total CPU time from /proc/stat for % calculation
+    // Read total CPU time from /proc/stat for % calculation.
+    // Semantics: cpu_percent = 100 means one logical core fully busy.
     unsigned long long total_cpu = 0;
     auto stat_file = utils::read_file("/proc/stat");
     if (stat_file.has_value()) {
@@ -54,6 +55,21 @@ std::vector<ProcessStats> ProcessMonitor::read_linux(unsigned int limit) {
         auto parts = utils::split(line, ' ');
         for (size_t i = 1; i < parts.size(); ++i) {
             try { total_cpu += std::stoull(parts[i]); } catch (...) {}
+        }
+    }
+
+    // Number of logical cores so per-process % is normalized to one core.
+    unsigned int logical_cores = 1;
+    {
+        auto cpuinfo = utils::read_file("/proc/cpuinfo");
+        if (cpuinfo.has_value()) {
+            std::istringstream iss(cpuinfo.value());
+            std::string line;
+            unsigned int count = 0;
+            while (std::getline(iss, line)) {
+                if (line.substr(0, 9) == "processor") ++count;
+            }
+            if (count > 0) logical_cores = count;
         }
     }
 
@@ -103,8 +119,14 @@ std::vector<ProcessStats> ProcessMonitor::read_linux(unsigned int limit) {
             if (it != previous_snapshots_.end() && cpu_delta > 0) {
                 double proc_delta = static_cast<double>(utime + stime) -
                                     static_cast<double>(it->second.utime + it->second.stime);
-                ps.cpu_percent = (proc_delta / cpu_delta) * 100.0;
-                if (ps.cpu_percent < 0) ps.cpu_percent = 0;
+                if (proc_delta > 0) {
+                    // Normalize to "100 % = one logical core".
+                    ps.cpu_percent = (proc_delta / cpu_delta) * 100.0 *
+                                     static_cast<double>(logical_cores);
+                    if (ps.cpu_percent > 100.0 * static_cast<double>(logical_cores)) {
+                        ps.cpu_percent = 100.0 * static_cast<double>(logical_cores);
+                    }
+                }
             }
 
             ProcSnapshot snap;
@@ -215,12 +237,22 @@ std::vector<ProcessStats> ProcessMonitor::read_linux(unsigned int) { return {}; 
 std::vector<ProcessStats> ProcessMonitor::read_macos(unsigned int limit) {
     std::vector<ProcessStats> result;
 
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-    size_t size = 0;
-    if (sysctl(mib, 4, nullptr, &size, nullptr, 0) != 0 || size == 0) return result;
+    // Enumerate with a retry loop: the process table can change size between
+    // the sizing call and the fill call.
+    std::vector<struct kinfo_proc> procs;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+        size_t size = 0;
+        if (sysctl(mib, 4, nullptr, &size, nullptr, 0) != 0 || size == 0) return result;
 
-    std::vector<struct kinfo_proc> procs(size / sizeof(struct kinfo_proc));
-    if (sysctl(mib, 4, procs.data(), &size, nullptr, 0) != 0) return result;
+        size_t count = size / sizeof(struct kinfo_proc);
+        if (count == 0) return result;
+        procs.resize(count);
+        if (sysctl(mib, 4, procs.data(), &size, nullptr, 0) == 0) break;
+        procs.clear();
+        if (attempt == 2) return result;
+    }
+    if (procs.empty()) return result;
 
     // Get total physical memory for calculating mem_percent
     uint64_t total_ram = 0;
@@ -256,7 +288,8 @@ std::vector<ProcessStats> ProcessMonitor::read_macos(unsigned int limit) {
         else if (state == SZOMB)  ps.state = "Z";
         else                     ps.state = "S";
 
-        // Query taskinfo via proc_pidinfo
+        // Query taskinfo via proc_pidinfo.  A single unreadable process
+        // (permission denied, zombie, vanished) must not abort the loop.
         struct proc_taskinfo pti{};
         int ret = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &pti, sizeof(pti));
         if (ret == sizeof(pti)) {
@@ -268,18 +301,18 @@ std::vector<ProcessStats> ProcessMonitor::read_macos(unsigned int limit) {
                 ps.mem_percent = (static_cast<double>(ps.mem_rss_bytes) / static_cast<double>(total_ram)) * 100.0;
             }
 
-            // CPU percentage from total user + system time in nanoseconds
+            // CPU percentage from total user + system time in nanoseconds.
+            // Semantics: 100 % = one fully utilized logical core.
             uint64_t total_time_ns = pti.pti_total_user + pti.pti_total_system;
             auto it = previous_snapshots_.find(pid);
             if (it != previous_snapshots_.end()) {
                 double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
                 if (dt > 0.0) {
-                    uint64_t prev_time = it->second.utime; // utime used as total_time_ns
+                    uint64_t prev_time = it->second.utime;
                     if (total_time_ns >= prev_time) {
                         double delta_ns = static_cast<double>(total_time_ns - prev_time);
                         double delta_sec = delta_ns / 1e9;
                         ps.cpu_percent = (delta_sec / dt) * 100.0;
-                        if (ps.cpu_percent < 0.0) ps.cpu_percent = 0.0;
                     }
                 }
             }

@@ -171,7 +171,9 @@ TemperatureStats TemperatureMonitor::read_all_sensors_linux() { return {}; }
 TemperatureStats TemperatureMonitor::read_all_sensors_macos() {
     TemperatureStats result;
 
-    // 1. Read Battery Temperature from AppleSmartBattery via IOKit
+    // 1. Read Battery Temperature from AppleSmartBattery via IOKit.
+    //    The value is in tenths of a degree Celsius and is only accepted
+    //    after a plausibility check.
     CFMutableDictionaryRef matching = IOServiceMatching("AppleSmartBattery");
     if (matching) {
         io_service_t battery = IOServiceGetMatchingService(kIOMainPortDefault, matching);
@@ -181,7 +183,8 @@ TemperatureStats TemperatureMonitor::read_all_sensors_macos() {
             if (temp_num && CFGetTypeID(temp_num) == CFNumberGetTypeID()) {
                 long long temp_val = 0;
                 CFNumberGetValue(temp_num, kCFNumberLongLongType, &temp_val);
-                // AppleSmartBattery Temperature is in tenths of a degree Celsius (e.g. 301 = 30.1 °C)
+                // AppleSmartBattery Temperature is in tenths of a degree Celsius
+                // (e.g. 301 = 30.1 °C).
                 double temp_c = static_cast<double>(temp_val) / 10.0;
                 if (temp_c > 0.0 && temp_c < 120.0) {
                     SensorReading r;
@@ -198,23 +201,12 @@ TemperatureStats TemperatureMonitor::read_all_sensors_macos() {
         }
     }
 
-    // 2. Read Thermal Level from sysctl
-    int thermal_level = 0;
-    size_t tlen = sizeof(thermal_level);
-    if (sysctlbyname("machdep.xcpm.cpu_thermal_level", &thermal_level, &tlen, nullptr, 0) == 0 ||
-        sysctlbyname("hw.thermal.level", &thermal_level, &tlen, nullptr, 0) == 0) {
-        // Map thermal level index to estimated SOC temperature equivalent
-        // Level 0: Nominal (~45-55°C), Level 1: Moderate (~65°C), Level 2: Heavy (~80°C), Level 3: Trapping (~95°C)
-        double estimated_c = 45.0 + (thermal_level * 15.0);
-        SensorReading r;
-        r.name = "SOC Thermal Pressure";
-        r.chip = "Apple Silicon PMU";
-        r.temperature_celsius = estimated_c;
-        r.high = 80.0;
-        r.critical = 95.0;
-        result.sensors.push_back(r);
-        result.cpu_package = estimated_c;
-    }
+    // 2. Thermal pressure is a separate measurement domain from temperature.
+    //    There is no stable unprivileged macOS API that exposes a real
+    //    CPU/SOC temperature in degrees Celsius.  Thermal-pressure levels are
+    //    NOT converted into a fake temperature and are NOT reported as
+    //    cpu_package.  Consequently the CPU temperature is unavailable.
+    result.cpu_package = std::nullopt;
 
     return result;
 }

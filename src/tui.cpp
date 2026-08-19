@@ -1,5 +1,6 @@
 #include "sysmon/tui.hpp"
 #include "sysmon/utils.hpp"
+#include "sysmon/version.hpp"
 
 #include <iostream>
 #include <sstream>
@@ -191,7 +192,7 @@ void TUI::render_header(std::ostringstream& out, const SystemStats& sys, int wid
     char tbuf[32];
     std::strftime(tbuf, sizeof(tbuf), "%H:%M:%S", std::localtime(&t));
 
-    std::string left  = " " + bold() + color_fg(100,200,255) + "⬡ sysmon v0.2.0" + reset_color()
+    std::string left  = " " + bold() + color_fg(100,200,255) + "⬡ sysmon v" + SYSMON_VERSION + reset_color()
                        + "  " + c_dim() + sys.os + " (" + sys.architecture + ")" + reset_color()
                        + (compact ? ("  " + c_warn() + "[COMPACT]" + reset_color()) : "");
     std::string right = c_dim() + sys.hostname + "  up: " + sys.uptime + reset_color()
@@ -218,9 +219,9 @@ void TUI::render_cpu_section(std::ostringstream& out, const CpuStats& cpu, int w
     out << c_label() << " Cores   " << reset_color() << c_value()
         << cpu.logical_cores << " logical / " << cpu.physical_cores << " physical" << reset_color();
 
-    if (cpu.frequency_mhz > 0) {
+    if (cpu.frequency_mhz.has_value()) {
         out << c_dim() << "  @" << reset_color() << c_value()
-            << std::fixed << std::setprecision(0) << cpu.frequency_mhz << " MHz" << reset_color();
+            << std::fixed << std::setprecision(0) << cpu.frequency_mhz.value() << " MHz" << reset_color();
     }
     if (cpu.temperature_celsius.has_value()) {
         double t = cpu.temperature_celsius.value();
@@ -272,8 +273,8 @@ void TUI::render_gpu_section(std::ostringstream& out, const std::vector<GpuStats
     for (const auto& g : gpus) {
         out << c_accent() << " " << g.name << reset_color()
             << c_dim() << " [" << g.vendor << "]" << reset_color();
-        if (g.gpu_cores > 0) {
-            out << c_dim() << " (" << g.gpu_cores << " GPU Cores)" << reset_color();
+        if (g.gpu_cores.has_value()) {
+            out << c_dim() << " (" << g.gpu_cores.value() << " GPU Cores)" << reset_color();
         }
         if (g.temperature_celsius.has_value()) {
             out << "  " << temp_color(g.temperature_celsius.value())
@@ -284,22 +285,31 @@ void TUI::render_gpu_section(std::ostringstream& out, const std::vector<GpuStats
         }
         out << "\033[K\n";
 
-        if (g.usage_percent > 0.0) {
+        if (g.usage_percent.has_value()) {
             out << c_label() << "  Engine " << reset_color()
-                << usage_color(g.usage_percent)
-                << std::fixed << std::setprecision(1) << g.usage_percent << "%" << reset_color()
-                << "  " << progress_bar(g.usage_percent, std::max(10, width - 40)) << "\033[K\n";
+                << usage_color(g.usage_percent.value())
+                << std::fixed << std::setprecision(1) << g.usage_percent.value() << "%" << reset_color()
+                << "  " << progress_bar(g.usage_percent.value(), std::max(10, width - 40)) << "\033[K\n";
+        } else {
+            out << c_label() << "  Engine " << reset_color()
+                << c_dim() << "N/A" << reset_color() << "\033[K\n";
         }
 
-        if (cfg.show_gpu_memory && g.memory_total_bytes > 0) {
-            std::string type_label = g.memory_type.empty() ? "VRAM" : g.memory_type + " Memory";
-            out << c_label() << "  " << std::setw(10) << type_label << " " << reset_color()
-                << usage_color(g.memory_usage_percent)
-                << format_bytes(g.memory_used_bytes) << " / " << format_bytes(g.memory_total_bytes)
-                << reset_color() << "  "
-                << progress_bar(g.memory_usage_percent, std::max(10, width - 48)) << "  "
-                << usage_color(g.memory_usage_percent)
-                << std::fixed << std::setprecision(1) << g.memory_usage_percent << "%" << reset_color() << "\033[K\n";
+        if (cfg.show_gpu_memory && g.memory_total_bytes.has_value()) {
+            if (g.memory_used_bytes.has_value()) {
+                std::string type_label = g.memory_type.empty() ? "VRAM" : g.memory_type + " Memory";
+                out << c_label() << "  " << std::setw(10) << type_label << " " << reset_color()
+                    << usage_color(g.memory_usage_percent.value_or(0.0))
+                    << format_bytes(g.memory_used_bytes.value()) << " / " << format_bytes(g.memory_total_bytes.value())
+                    << reset_color() << "  "
+                    << progress_bar(g.memory_usage_percent.value_or(0.0), std::max(10, width - 48)) << "  "
+                    << usage_color(g.memory_usage_percent.value_or(0.0))
+                    << std::fixed << std::setprecision(1) << g.memory_usage_percent.value_or(0.0) << "%" << reset_color() << "\033[K\n";
+            } else {
+                out << c_label() << "  Memory    " << reset_color()
+                    << g.memory_type << " · unified capacity "
+                    << format_bytes(g.memory_total_bytes.value()) << reset_color() << "\033[K\n";
+            }
         }
     }
     out << "\033[K\n";
@@ -550,8 +560,8 @@ void TUI::render(const SystemStats&                   system,
     // Update sparkline histories
     push_history(cpu_history_,  cpu.usage_percent);
     push_history(mem_history_,  memory.ram_usage_percent);
-    if (!gpus.empty()) {
-        push_history(gpu_history_, gpus[0].usage_percent);
+    if (!gpus.empty() && gpus[0].usage_percent.has_value()) {
+        push_history(gpu_history_, gpus[0].usage_percent.value());
     }
     if (cpu.temperature_celsius.has_value()) {
         push_history(cpu_temp_history_, cpu.temperature_celsius.value());

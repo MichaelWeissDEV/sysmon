@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cstdlib>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -16,8 +17,19 @@ namespace fs = std::filesystem;
 // ---------------------------------------------------------------------------
 
 std::string Config::default_config_path() {
+    // --config PATH always takes precedence (handled in main); this is the
+    // default location when no explicit path is given.
+    //
+    // Precedence:
+    //   1. $XDG_CONFIG_HOME/sysmon/sysmon.conf      (when XDG_CONFIG_HOME is set)
+    //   2. $HOME/.config/sysmon/sysmon.conf         (legacy fallback)
+    //   3. /tmp/sysmon/sysmon.conf                  (no HOME available)
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg != '\0') {
+        return std::string(xdg) + "/sysmon/sysmon.conf";
+    }
     const char* home = std::getenv("HOME");
-    if (!home) home = "/tmp";
+    if (!home || *home == '\0') return "/tmp/sysmon/sysmon.conf";
     return std::string(home) + "/.config/sysmon/sysmon.conf";
 }
 
@@ -34,6 +46,14 @@ static bool parse_bool(const std::string& v) {
     std::string lv = v;
     std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
     return lv == "true" || lv == "1" || lv == "yes" || lv == "on";
+}
+
+static std::optional<int> parse_int(const std::string& v) {
+    try {
+        return std::stoi(utils::trim(v));
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 static std::set<std::string> parse_set(const std::string& v) {
@@ -89,8 +109,9 @@ Config Config::load_from(const std::string& path) {
 
         // ---- [display] ----
         if (section == "display") {
-            if (key == "refresh_interval")           cfg.refresh_interval = std::stoi(val);
-            else if (key == "tui_enabled")           cfg.tui_enabled = parse_bool(val);
+            if (key == "refresh_interval") {
+                if (auto v = parse_int(val)) cfg.refresh_interval = v.value();
+            } else if (key == "tui_enabled")           cfg.tui_enabled = parse_bool(val);
             else if (key == "compact_mode")          cfg.compact_mode = parse_bool(val);
             else if (key == "show_cpu")              cfg.show_cpu = parse_bool(val);
             else if (key == "show_cpu_per_core")     cfg.show_cpu_per_core = parse_bool(val);
@@ -108,19 +129,24 @@ Config Config::load_from(const std::string& path) {
             else if (key == "show_network_per_iface") cfg.show_network_per_iface = parse_bool(val);
             else if (key == "show_network_sparkline") cfg.show_network_sparkline = parse_bool(val);
             else if (key == "show_connections")      cfg.show_connections = parse_bool(val);
-            else if (key == "connections_limit")     cfg.connections_limit = std::stoi(val);
-            else if (key == "connections_show_listen") cfg.connections_show_listen = parse_bool(val);
+            else if (key == "connections_limit") {
+                if (auto v = parse_int(val)) cfg.connections_limit = v.value();
+            } else if (key == "connections_show_listen") cfg.connections_show_listen = parse_bool(val);
             else if (key == "show_processes")        cfg.show_processes = parse_bool(val);
-            else if (key == "proc_limit")            cfg.proc_limit = std::stoi(val);
-            else if (key == "show_proc_threads")     cfg.show_proc_threads = parse_bool(val);
+            else if (key == "proc_limit") {
+                if (auto v = parse_int(val)) cfg.proc_limit = v.value();
+            } else if (key == "show_proc_threads")     cfg.show_proc_threads = parse_bool(val);
             else if (key == "show_proc_network")     cfg.show_proc_network = parse_bool(val);
         }
         // ---- [tui] ----
         else if (section == "tui") {
             if (key == "use_unicode")        cfg.tui_use_unicode = parse_bool(val);
             else if (key == "use_colors")    cfg.tui_use_colors = parse_bool(val);
-            else if (key == "sparkline_length") cfg.sparkline_length = std::stoi(val);
-            else if (key == "proc_sort_col") cfg.proc_sort_col = std::stoi(val);
+            else if (key == "sparkline_length") {
+                if (auto v = parse_int(val)) cfg.sparkline_length = v.value();
+            } else if (key == "proc_sort_col") {
+                if (auto v = parse_int(val)) cfg.proc_sort_col = v.value();
+            }
         }
         // ---- [network] ----
         else if (section == "network") {
