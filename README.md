@@ -23,15 +23,34 @@ A comprehensive, cross-platform terminal-based system monitor written in modern 
 | Platform | Status |
 |----------|--------|
 | Linux    | Full support (`/proc`, `/sys`, hwmon) |
-| macOS    | Full support (Intel + Apple Silicon, Mach APIs) |
+| macOS    | Supported (Intel + Apple Silicon, Mach APIs; some metrics are N/A — see below) |
 | Windows  | Planned |
+
+### macOS metric availability
+
+macOS does not expose every metric via an unprivileged, stable API. The following
+are reported as `N/A` rather than guessed:
+
+| Metric | macOS |
+|--------|-------|
+| CPU usage, per-core usage | ✓ |
+| CPU frequency | N/A on Apple Silicon (no `hw.cpufrequency`); Intel only when the sysctl exists |
+| CPU package temperature | N/A (thermal pressure is not a temperature) |
+| GPU usage / frequency / memory usage | N/A |
+| GPU cores | Only when `hw.gpu.count` exists |
+| Unified memory capacity | ✓ (from `hw.memsize`) |
+| Network throughput, addresses | ✓ |
+| Network link speed | N/A |
+| Battery temperature | ✓ (via IOKit, when present) |
+| Disk capacity + I/O | ✓ |
+| Active TCP/UDP connections with PID | ✓ (parsed from `netstat -anv`) |
 
 ## Quick Start
 
 ```bash
 # Build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake --build build --parallel
 
 # Live dashboard
 ./build/sysmon
@@ -130,7 +149,7 @@ brew install cmake
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake --build build --parallel
 sudo cmake --install build      # install to /usr/local/bin
 ```
 

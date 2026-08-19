@@ -1,38 +1,29 @@
 # Changelog
 
-## v0.2.0 (2025)
-
-### New Features
-
-- **Live TUI Dashboard** — Full-screen ANSI color dashboard with:
-  - Sparkline history graphs for CPU, memory, and network
-  - Progress bars with color coding (green/yellow/red by threshold)
-  - Per-core CPU breakdown
-  - Keyboard shortcuts (q to quit, r to refresh)
-- **Network Monitoring** — Per-interface rx/tx throughput, IP address, link speed
-- **Disk I/O Monitoring** — Per-device read/write throughput from `/proc/diskstats`
-- **Process Monitor** — Top processes by CPU with user, RSS, VMS, thread count, state
-- **Extended Temperature Sensors** — All hwmon sensors with labels and thresholds
-- **macOS Support** — Full port using sysctl, Mach APIs, and getifaddrs
-- **Per-core CPU stats** — Individual core usage and frequency
-- **Detailed CPU time breakdown** — user%, sys%, iowait%, idle%
-- **Extended system info** — Architecture, raw uptime seconds
+## Unreleased
 
 ### Improvements
 
-- `--once` flag for script-friendly one-shot output
-- `--no-tui` for plain text live refresh
-- `--interval N` to control refresh period
-- Keyboard input handling (non-blocking)
-- Rate monitors (network, disk I/O) carry internal state for accurate delta computation
-- Extended virtual filesystem filter in disk monitor
-- Stable sort: root filesystem always first
+- **Build system hardening** — Target-based `CMakeLists.txt` with `cxx_std_20`, target-private warning flags, `SYSMON_WARNINGS_AS_ERRORS` option, and a generated `version.hpp` single-sourcing the version.
+- **Portable parallel builds** — `Makefile` no longer relies on `nproc`/`sysctl`, using `cmake --build --parallel` instead.
+- **Configuration path** — Config now honors `$XDG_CONFIG_HOME` with fallback to `~/.config/sysmon/sysmon.conf`.
+- **GitHub Actions CI** — Linux, macOS (Apple Silicon), macOS (Intel), ASan+UBSan, and Sphinx documentation jobs.
+
+### macOS fixes
+
+- **No fabricated temperatures** — The thermal-pressure-to-Celsius conversion (`45.0 + thermal_level * 15.0`) was removed. CPU package temperature is reported as N/A on macOS; battery temperature is read via IOKit (`AppleSmartBattery`) when present.
+- **Honest GPU reporting** — Removed the hardcoded Apple M-chip GPU-core lookup table and the fake "wired + compressed RAM = GPU memory used" formula. Only `hw.gpu.count` (cores) and `hw.memsize` (unified capacity) are reported; usage, frequency, and memory usage are N/A.
+- **CPU frequency** — Reported only from valid `hw.cpufrequency*` sysctls; no timebase derivation, so Apple Silicon reports N/A.
+- **CPU usage semantics** — Normalized so `100 % = one fully utilized logical core` on both platforms; hardened against counter resets.
+- **Network connections** — Parsers rewritten against real `netstat -anv` output (TCP state column, token-spanning `process:pid`); no fabricated PIDs.
+- **Rate underflow guards** — Network and disk I/O deltas no longer underflow when counters reset.
+- **Robust process enumeration** — macOS sysctl retry loop and per-process fault tolerance.
 
 ### Bug Fixes
 
-- Correct CPU usage calculation using per-core `/proc/stat` lines
-- Fixed duplicate `enable_testing()` in CMakeLists.txt
-- Fixed macOS uptime via `kern.boottime` sysctl
+- Fixed duplicate `enable_testing()` in CMakeLists.txt.
+- Invalid config values fall back to defaults instead of crashing.
+- Corrected test expectations (bytes formatting, CPU delta math, netstat wildcard addresses).
 
 ---
 

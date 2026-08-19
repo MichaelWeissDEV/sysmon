@@ -38,7 +38,7 @@ public:
 | Platform | Data Source |
 |----------|-------------|
 | Linux | `/sys/class/hwmon/hwmon*/temp*_input`, `/sys/class/thermal/thermal_zone*/temp` |
-| macOS | IOKit SMC (framework linking required; stub returns empty) |
+| macOS | IOKit `AppleSmartBattery` (battery temperature); CPU temperature is `N/A` |
 
 ### Linux Details
 
@@ -46,6 +46,15 @@ public:
   Labels come from `temp<N>_label`; thresholds from `temp<N>_max` and `temp<N>_crit`.
 - **CPU package** is auto-detected from `coretemp`, `k10temp`, and `zenpower` drivers.
 - **Fallback**: `/sys/class/thermal/thermal_zone*/temp` is used if hwmon is unavailable.
+
+### macOS Details
+
+- The CPU/SOC package temperature is not exposed through any stable, unprivileged
+  macOS API. `cpu_package` is therefore reported as `N/A`. Thermal-pressure levels
+  are **not** converted into a fake temperature.
+- Battery temperature is read from the `AppleSmartBattery` IOKit service
+  (reported in tenths of a degree Celsius) and only accepted after a
+  plausibility check.
 
 ## Example
 

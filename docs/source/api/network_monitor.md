@@ -33,7 +33,7 @@ public:
 | `ip_address` | `std::string` | IPv4 address |
 | `ip6_address` | `std::string` | IPv6 address |
 | `is_up` | `bool` | Interface up/down state |
-| `speed_mbps` | `uint64_t` | Link speed in Mbps (0 = unknown) |
+| `speed_mbps` | `optional<uint64_t>` | Link speed in Mbps (N/A when unknown) |
 
 ## Platform Notes
 
@@ -44,6 +44,11 @@ public:
 
 > **Rate calculation:** The monitor stores the previous sample internally.  
 > The first call returns zero rates. Subsequent calls compute delta / elapsed time.
+> Counter resets are handled (rates never underflow).
+
+> **Link speed:** On macOS there is no unprivileged, stable API for interface
+> link speed, so `speed_mbps` is reported as N/A. On Linux it is read from
+> `/sys/class/net/<iface>/speed`.
 
 ## Example
 

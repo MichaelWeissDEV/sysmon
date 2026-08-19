@@ -16,7 +16,7 @@ sysmon follows a clean **collect → render** separation. Each monitor class is 
 │                                                                            │
 │  SystemMonitor   CpuMonitor    MemoryMonitor    LoadMonitor                │
 │  DiskMonitor     DiskIOMonitor TemperatureMonitor                          │
-│  NetworkMonitor  ProcessMonitor                                            │
+│  GpuMonitor      NetworkMonitor NetConnectionsMonitor ProcessMonitor       │
 └────────────────┬───────────────────────────────────────────────────────────┘
                  │  returns populated structs (stats.hpp)
                  ▼
@@ -74,10 +74,17 @@ sysmon/
 │   ├── test_load_monitor.cpp
 │   ├── test_system_monitor.cpp
 │   ├── test_network_monitor.cpp
-│   └── test_disk_monitor.cpp
+│   ├── test_disk_monitor.cpp
+│   ├── test_disk_io_monitor.cpp
+│   ├── test_temperature_monitor.cpp
+│   ├── test_process_monitor.cpp
+│   ├── test_net_connections_monitor.cpp
+│   ├── test_text_renderer.cpp
+│   ├── test_cli.cpp
+│   └── test_config.cpp
 └── docs/
     ├── source/             # Sphinx documentation (Read the Docs)
-    └── doxygen/            # Generated Doxygen API docs
+    └── requirements.txt
 ```
 
 ---

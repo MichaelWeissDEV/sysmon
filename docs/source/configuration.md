@@ -4,8 +4,12 @@
 
 ## Configuration File
 
-The default configuration file is located at:
-`~/.config/sysmon/sysmon.conf`
+The configuration file is resolved in the following order:
+
+1. `$XDG_CONFIG_HOME/sysmon/sysmon.conf`
+2. `~/.config/sysmon/sysmon.conf`
+
+On macOS and other systems without `XDG_CONFIG_HOME`, the `~/.config` location is used.
 
 You can generate a default configuration file with all available options by running:
 ```bash
@@ -129,5 +133,5 @@ You can also override any configuration setting using CLI flags:
 
 ### Configuration File Options
 - `--config /path/to/file.conf` : Load custom configuration file
-- `--generate-config` : Create default config at `~/.config/sysmon/sysmon.conf`
+- `--generate-config` : Create default config at the config file location
 - `--show-config` : Print current parsed configuration

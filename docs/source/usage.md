@@ -24,7 +24,7 @@ Press any of the following keys at runtime to toggle components on and off immed
 - **`t`** : Toggle Temperatures and Hardware Sensors
 - **`d`** : Toggle Filesystems & Disk I/O read/write rates
 - **`m`** : Toggle **Compact Mode** (switches between full granular view and summary dashboard)
-- **`s`** : **Save** your current display choices to `~/.config/sysmon/sysmon.conf`
+- **`s`** : **Save** your current display choices to the config file location
 - **`r`** : Force immediate refresh
 - **`q`** / **`ESC`** : Quit
 

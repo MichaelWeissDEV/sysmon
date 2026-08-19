@@ -5,10 +5,10 @@ We welcome contributions! This guide explains how to set up your development env
 ## Development Setup
 
 ```bash
-git clone https://github.com/yourname/sysmon.git
+git clone https://github.com/MichaelWeissDEV/sysmon.git
 cd sysmon
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j$(nproc)
+cmake --build build --parallel
 ```
 
 ## Running Tests

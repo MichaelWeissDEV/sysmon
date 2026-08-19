@@ -7,9 +7,9 @@ import sys
 # -- Project information -----------------------------------------------------
 project   = 'sysmon'
 author    = 'sysmon contributors'
-copyright = '2025, sysmon contributors'
-release   = '0.2.0'
-version   = '0.2'
+copyright = '2026, sysmon contributors'
+release   = 'Unreleased'
+version   = 'Unreleased'
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -17,7 +17,6 @@ extensions = [
     'sphinx.ext.viewcode',
     'sphinx.ext.githubpages',
     'myst_parser',           # Markdown support
-    'breathe',               # Doxygen XML → Sphinx (optional)
 ]
 
 source_suffix = {
@@ -27,12 +26,6 @@ source_suffix = {
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
-
-# -- Breathe (Doxygen integration) -------------------------------------------
-breathe_projects = {
-    'sysmon': '../doxygen/xml',
-}
-breathe_default_project = 'sysmon'
 
 # -- HTML output ------------------------------------------------------------
 html_theme         = 'sphinx_rtd_theme'

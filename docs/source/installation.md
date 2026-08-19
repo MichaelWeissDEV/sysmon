@@ -25,7 +25,9 @@ xcode-select --install
 brew install cmake
 ```
 
-> **Note:** Temperature readings on macOS require IOKit linkage (bundled automatically when using the CMake build).
+> **Note:** On macOS the IOKit and CoreFoundation frameworks are linked
+> automatically by the CMake build (used for battery temperature and CPU
+> model detection).
 
 ---
 
@@ -34,10 +36,10 @@ brew install cmake
 ### CMake (recommended)
 
 ```bash
-git clone https://github.com/yourname/sysmon.git
+git clone https://github.com/MichaelWeissDEV/sysmon.git
 cd sysmon
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake --build build --parallel
 ./build/sysmon
 ```
 
