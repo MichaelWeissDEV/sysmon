@@ -1,0 +1,10 @@
+build/
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store
+*.swp
+__pycache__/
+docs/_build/
+docs/doxygen/
