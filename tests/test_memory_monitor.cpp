@@ -1,31 +1,42 @@
-#include <iostream>
-#include "../include/sysmon/memory_monitor.hpp"
-#include <cassert>
+#include <gtest/gtest.h>
+#include "sysmon/memory_monitor.hpp"
 
-void test_parse_meminfo() {
-    // Test with a mock meminfo content
-    std::string mock_meminfo =
+TEST(MemoryMonitorTest, ParseMeminfoValue) {
+    const std::string data =
         "MemTotal:        8123456 kB\n"
         "MemAvailable:    6543210 kB\n"
         "SwapTotal:       2097152 kB\n"
         "SwapFree:        1048576 kB\n";
 
-    MemoryMonitor monitor;
-
-    // Note: We can't easily test the actual parsing without real files,
-    // but we can verify compilation and basic structure
-
-    std::cout << "MemoryMonitor parse test - compilation check passed!" << std::endl;
+    EXPECT_EQ(MemoryMonitor::parse_meminfo_value("MemTotal", data).value_or(0),
+              static_cast<uint64_t>(8123456) * 1024);
+    EXPECT_EQ(MemoryMonitor::parse_meminfo_value("SwapFree", data).value_or(0),
+              static_cast<uint64_t>(1048576) * 1024);
+    EXPECT_FALSE(MemoryMonitor::parse_meminfo_value("MissingKey", data).has_value());
 }
 
-int main() {
-    try {
-        test_parse_meminfo();
-        std::cout << "All memory monitor tests passed!" << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Test failed: " << e.what() << std::endl;
-        return 1;
-    }
+TEST(MemoryMonitorTest, ParseMeminfoValueMalformed) {
+    const std::string data = "MemTotal: not-a-number kB\n";
+    EXPECT_FALSE(MemoryMonitor::parse_meminfo_value("MemTotal", data).has_value());
+}
 
-    return 0;
+TEST(MemoryMonitorTest, ReportsTotalRam) {
+    MemoryMonitor mon;
+    auto stats = mon.read();
+    EXPECT_GT(stats.ram_total_bytes, 0ull);
+}
+
+TEST(MemoryMonitorTest, UsagePercentInRange) {
+    MemoryMonitor mon;
+    auto stats = mon.read();
+    EXPECT_GE(stats.ram_usage_percent, 0.0);
+    EXPECT_LE(stats.ram_usage_percent, 100.0);
+}
+
+TEST(MemoryMonitorTest, UsedNotExceedingTotal) {
+    MemoryMonitor mon;
+    auto stats = mon.read();
+    if (stats.ram_total_bytes > 0) {
+        EXPECT_LE(stats.ram_used_bytes, stats.ram_total_bytes);
+    }
 }

@@ -1,39 +1,55 @@
-#include <iostream>
-#include "../include/sysmon/utils.hpp"
-#include <cassert>
+#include <gtest/gtest.h>
+#include "sysmon/utils.hpp"
 
-void test_format_bytes() {
-    // Test basic formatting
-    assert(utils::format_bytes(1023) == "1023 B");
-    assert(utils::format_bytes(1024) == "1.0 KB");
-    assert(utils::format_bytes(1024 * 1024) == "1.0 MB");
-    assert(utils::format_bytes(1024 * 1024 * 1024) == "1.0 GB");
-
-    // Test with values that should round to 0.5
-    assert(utils::format_bytes(512 * 1024) == "0.5 MB");
-
-    std::cout << "All format_bytes tests passed!" << std::endl;
+TEST(UtilsTest, FormatBytes) {
+    EXPECT_EQ(utils::format_bytes(0), "0 B");
+    EXPECT_EQ(utils::format_bytes(1023), "1023 B");
+    EXPECT_EQ(utils::format_bytes(1024), "1.0 KB");
+    EXPECT_EQ(utils::format_bytes(1024 * 1024), "1.0 MB");
+    EXPECT_EQ(utils::format_bytes(1024ULL * 1024 * 1024), "1.0 GB");
+    EXPECT_EQ(utils::format_bytes(512 * 1024), "512.0 KB");
 }
 
-void test_format_duration() {
-    // Test uptime formatting
-    assert(utils::format_duration("3600") == "1h 0m");  // 1 hour
-    assert(utils::format_duration("7200") == "2h 0m");  // 2 hours
-    assert(utils::format_duration("3661") == "1h 1m");  // 1 hour, 1 minute
-    assert(utils::format_duration("86400") == "1d 0h 0m");  // 1 day
-
-    std::cout << "All format_duration tests passed!" << std::endl;
+TEST(UtilsTest, FormatBytesPerSec) {
+    EXPECT_EQ(utils::format_bytes_per_sec(0.0), "0.0 B/s");
+    EXPECT_EQ(utils::format_bytes_per_sec(1024.0), "1.0 KB/s");
+    EXPECT_EQ(utils::format_bytes_per_sec(1024.0 * 1024.0), "1.0 MB/s");
+    EXPECT_EQ(utils::format_bytes_per_sec(-10.0), "0.0 B/s");
 }
 
-int main() {
-    try {
-        test_format_bytes();
-        test_format_duration();
-        std::cout << "All utils tests passed!" << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Test failed: " << e.what() << std::endl;
-        return 1;
-    }
+TEST(UtilsTest, FormatDurationSeconds) {
+    EXPECT_EQ(utils::format_duration_seconds(0), "0s");
+    EXPECT_EQ(utils::format_duration_seconds(59), "59s");
+    EXPECT_EQ(utils::format_duration_seconds(3600), "1h 0m 0s");
+    EXPECT_EQ(utils::format_duration_seconds(3661), "1h 1m 1s");
+    EXPECT_EQ(utils::format_duration_seconds(86400), "1d 0h 0m 0s");
+    EXPECT_EQ(utils::format_duration_seconds(-5), "0s");
+}
 
-    return 0;
+TEST(UtilsTest, FormatDurationString) {
+    EXPECT_EQ(utils::format_duration("3600"), "1h 0m 0s");
+    EXPECT_EQ(utils::format_duration("not-a-number"), "not-a-number");
+}
+
+TEST(UtilsTest, Trim) {
+    EXPECT_EQ(utils::trim("  hello \t"), "hello");
+    EXPECT_EQ(utils::trim(""), "");
+    EXPECT_EQ(utils::trim("   "), "");
+    EXPECT_EQ(utils::trim("no-spaces"), "no-spaces");
+}
+
+TEST(UtilsTest, Split) {
+    auto parts = utils::split("a b c", ' ');
+    ASSERT_EQ(parts.size(), 3u);
+    EXPECT_EQ(parts[0], "a");
+    EXPECT_EQ(parts[1], "b");
+    EXPECT_EQ(parts[2], "c");
+
+    auto csv = utils::split("1,2,3", ',');
+    ASSERT_EQ(csv.size(), 3u);
+    EXPECT_EQ(csv[0], "1");
+}
+
+TEST(UtilsTest, ReadFileMissing) {
+    EXPECT_FALSE(utils::read_file("/nonexistent/path/that/does/not/exist").has_value());
 }

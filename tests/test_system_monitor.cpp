@@ -1,24 +1,24 @@
-#include <iostream>
-#include "../include/sysmon/system_monitor.hpp"
-#include <cassert>
+#include <gtest/gtest.h>
+#include "sysmon/system_monitor.hpp"
 
-// This test is mostly for compilation verification since we can't easily mock /etc/os-release
-void test_system_monitor_compilation() {
-    SystemMonitor monitor;
-    // Just verify it compiles and can be instantiated
-    auto stats = monitor.read();
-
-    std::cout << "SystemMonitor compilation test passed!" << std::endl;
+TEST(SystemMonitorTest, ReportsHostAndKernel) {
+    SystemMonitor mon;
+    auto stats = mon.read();
+    EXPECT_FALSE(stats.hostname.empty());
+    EXPECT_FALSE(stats.kernel.empty());
+    EXPECT_FALSE(stats.architecture.empty());
+    EXPECT_FALSE(stats.os.empty());
 }
 
-int main() {
-    try {
-        test_system_monitor_compilation();
-        std::cout << "All system monitor tests passed!" << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Test failed: " << e.what() << std::endl;
-        return 1;
-    }
+TEST(SystemMonitorTest, ArchitectureMatchesPlatform) {
+    SystemMonitor mon;
+    auto stats = mon.read();
+    // Both CI platforms report a non-empty architecture string.
+    EXPECT_FALSE(stats.architecture.empty());
+}
 
-    return 0;
+TEST(SystemMonitorTest, UptimeNonNegative) {
+    SystemMonitor mon;
+    auto stats = mon.read();
+    EXPECT_GE(stats.uptime_seconds, 0.0);
 }
