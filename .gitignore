@@ -1,4 +1,7 @@
 build/
+build-*/
+stage/
+.cache/
 *.o
 *.a
 *.so
@@ -8,3 +11,4 @@ build/
 __pycache__/
 docs/_build/
 docs/doxygen/
+.venv/

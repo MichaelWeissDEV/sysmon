@@ -1,0 +1,3 @@
+#pragma once
+
+#define SYSMON_VERSION "@PROJECT_VERSION@"

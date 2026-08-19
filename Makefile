@@ -6,11 +6,11 @@ all: build
 
 build:
 	@cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
-	@cmake --build $(BUILD_DIR) -j$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+	@cmake --build $(BUILD_DIR) --parallel
 
 debug:
 	@cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Debug
-	@cmake --build $(BUILD_DIR) -j$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+	@cmake --build $(BUILD_DIR) --parallel
 
 test: build
 	@cd $(BUILD_DIR) && ctest --output-on-failure
@@ -25,12 +25,12 @@ once: build
 	@./$(BUILD_DIR)/sysmon --once
 
 install: build
-	@sudo cmake --install $(BUILD_DIR)
+	@cmake --install $(BUILD_DIR)
 
 docs: build
 	@cmake --build $(BUILD_DIR) --target doxygen 2>/dev/null || true
 	@if command -v sphinx-build >/dev/null 2>&1; then \
-		sphinx-build docs/source docs/_build/html; \
+		sphinx-build -W --keep-going docs/source docs/_build/html; \
 		echo "Sphinx documentation generated at: docs/_build/html/index.html"; \
 	fi
 
@@ -45,5 +45,5 @@ help:
 	@echo "  make once    - Print snapshot once to terminal"
 	@echo "  make test    - Run GoogleTest test suite"
 	@echo "  make docs    - Build Doxygen and Sphinx documentation"
-	@echo "  make install - Install to /usr/local/bin"
+	@echo "  make install - Install to the CMake install prefix"
 	@echo "  make clean   - Remove build artifacts"
