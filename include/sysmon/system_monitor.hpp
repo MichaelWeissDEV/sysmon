@@ -7,6 +7,7 @@
 #define SYSMON_SYSTEM_MONITOR_HPP
 
 #include "sysmon/stats.hpp"
+#include <string>
 
 /**
  * @brief Reads general system metadata.
@@ -18,6 +19,14 @@ public:
      * @return Populated SystemStats struct.
      */
     SystemStats read();
+
+    /**
+     * @brief Parse a pretty OS name out of /etc/os-release content.
+     *
+     * Prefers PRETTY_NAME, falls back to NAME + VERSION.  Handles quoted and
+     * unquoted values.  Returns an empty string when nothing usable is found.
+     */
+    static std::string parse_os_release(const std::string& content);
 
 private:
     std::string get_os_name();
