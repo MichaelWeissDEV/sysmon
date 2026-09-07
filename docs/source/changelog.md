@@ -33,10 +33,45 @@
   per-device IOPS, utilisation and average request latency.
 - **Network**: MAC, MTU, duplex, packet rates, error and drop counters, the
   default gateway, DNS servers, and a socket-state census.
-- **Processes**: PPID, nice level, accumulated CPU time, open file count,
-  per-process disk I/O, command line, and sorting by cpu/mem/pid/name/time.
+- **Processes**: PPID, nice level, accumulated CPU time, open file count and
+  the descriptor paths themselves, per-process disk I/O rate *and* lifetime
+  totals, open socket count, upload rate, command line, and sorting by
+  cpu/mem/pid/name/time.
+- **Per-process upload rate on macOS**, from the cumulative per-socket byte
+  counters `netstat -anv` reports next to the owning process. Verified against
+  an exact 10485760-byte transfer and a rate-limited download. The receive
+  direction is *not* reported: the same interface's `rxbytes` column advances
+  at 2.003x the bytes an application actually receives, and halving it would be
+  a calibration from one machine. Linux exposes no per-process byte counters
+  without privileges and the Windows EStats API needs administrator rights, so
+  both report N/A there.
 - **System**: OS build, machine model, boot time, timezone, logged-in user
   count, and hypervisor/container detection.
+
+### Views and navigation
+
+- **Nine full-screen views**, reached with `0`–`8` or `Tab` and openable
+  directly with `--view NAME`. Each one has room for the fields the overview
+  cannot fit: CPU topology and every core, the full memory breakdown and the
+  largest consumers, per-adapter GPU detail, per-device disk latency and the
+  processes doing the I/O, per-interface MAC/MTU/duplex/link speed, every
+  socket with its owning process, the whole process table, and every sensor
+  with its thresholds.
+- **Four density levels** — `compact`, `normal`, `detailed`, `full` — changed
+  live with `+` and `-` or set with `--detail`. They replace the old
+  `compact_mode` boolean, which is still read from existing config files.
+  The plain-text renderer honours the level too.
+- **Scrollable lists.** `↑`/`↓`, `PgUp`/`PgDn` and `Home`/`End` move a cursor
+  through the process, connection, core, sensor, filesystem and interface
+  lists. The cursor is tracked by process identity rather than row index,
+  because the table re-sorts on every refresh.
+- **`a` and `--all`** lift the display limits entirely, so every process and
+  every socket is reachable.
+- **A per-process inspector** on `Enter`: full command line, parent, nice,
+  accumulated CPU time, disk rates alongside lifetime totals, the process's own
+  connections, and the files, sockets and pipes it has open. Descriptor tables
+  are read for the inspected process only. Another user's process reports
+  `permission denied` rather than an empty list.
 
 ### New output modes
 
@@ -98,6 +133,28 @@
   defaults to a 5-second timeout whose expiry is a build error that deletes the
   test binary; a loaded parallel build on a shared CI runner beat it often
   enough to red-light the matrix. Raised to 60 seconds.
+- **Arrow keys quit the dashboard.** Every arrow and page key starts with the
+  same byte as Escape, and Escape was wired straight to "quit", so pressing
+  Down killed the program. Keystrokes are now decoded into named keys, with the
+  timed lookahead that is the only way to tell a real Escape from the start of
+  a sequence.
+
+  **Behaviour change:** `Esc` is now "back" — it leaves a focus view and quits
+  only from the overview, so a mistyped view change is not a quit. `q` and
+  `Ctrl+C` still quit from anywhere.
+- **`--compact` did nothing in text mode.** It was accepted and then ignored by
+  the plain-text renderer, so the flag looked as though it had worked while the
+  output was identical.
+- **A limit of `0` meant "show nothing".** Every collector reads 0 as "no
+  limit", but the three display loops read it as a count, so `--limit 0` and
+  `--all` produced empty tables.
+- **The status bar could overflow a narrow terminal.** It budgeted room for the
+  OS string but then appended the compact tag and the right-hand half
+  regardless; each optional part is now taken only while the row still fits.
+- **Section headings were never truncated**, so a generated heading wrapped the
+  whole frame on a narrow terminal.
+- Six views drew a label-bar-percentage row with their own hand-tuned
+  constants; the arithmetic now lives in one place that cannot overflow.
 - Disk usage is clamped and underflow-guarded, so a filesystem reporting more
   free blocks than total blocks can no longer produce a nonsensical figure.
 - IPv6 addresses now prefer a routable address over the link-local one.

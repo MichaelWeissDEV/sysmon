@@ -492,6 +492,14 @@ void JsonRenderer::render_to(std::ostream& out, const Snapshot& snap, const Conf
         w.field_opt("open_files", p.open_files);
         w.field_opt("io_read_bytes_per_sec", p.io_read_bytes_per_sec, 1);
         w.field_opt("io_write_bytes_per_sec", p.io_write_bytes_per_sec, 1);
+        w.field_opt("io_read_bytes_total", p.io_read_bytes_total);
+        w.field_opt("io_write_bytes_total", p.io_write_bytes_total);
+        // null on Linux and Windows: neither exposes per-process socket byte
+        // counters to an unprivileged process, and a 0 here would be read as
+        // "this process used no network".
+        w.field_opt("rx_bytes_per_sec", p.rx_bytes_per_sec, 1);
+        w.field_opt("tx_bytes_per_sec", p.tx_bytes_per_sec, 1);
+        w.field_opt("socket_count", p.socket_count);
         w.end_object();
     }
     w.end_array();

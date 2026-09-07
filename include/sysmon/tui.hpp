@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <sstream>
 #include <cstdint>
 
 /**
@@ -25,7 +26,14 @@ public:
 
     /**
      * @brief Perform a full screen render of one snapshot.
+     *
+     * @param view Mutable: the renderer is the only place that knows how many
+     *             rows the viewport and the data have, so it is what clamps a
+     *             scroll offset and resolves a selection back to a real row.
      */
+    void render(const Snapshot& snap, const Config& cfg, ViewState& view);
+
+    /** @brief Render the overview, for callers with no interactive state. */
     void render(const Snapshot& snap, const Config& cfg);
 
     /** @brief Clear the screen and reset cursor. */
@@ -70,6 +78,75 @@ private:
     std::string c_accent()   const;
     std::string c_border()   const;
     std::string c_dim()      const;
+
+    /**
+     * @brief The slice of a long list that is currently on screen.
+     *
+     * Produced by clamp_window(), which is also what writes the corrected
+     * offset back into the ViewState — so a scroll past the end settles at the
+     * end instead of showing blank space forever.
+     */
+    struct ListWindow {
+        int first{0};    ///< Index of the first visible row
+        int count{0};    ///< Number of visible rows
+        int total{0};    ///< Rows the list has in all
+        int cursor{-1};  ///< Row the cursor is on, or -1 when the list is empty
+        bool has_more_above() const { return first > 0; }
+        bool has_more_below() const { return first + count < total; }
+        bool is_cursor(int row) const { return row == cursor; }
+    };
+
+    /**
+     * @brief Resolve the visible slice of a list and settle the cursor in it.
+     *
+     * Writes the clamped cursor and the derived scroll offset back into @p view,
+     * which is what stops a held-down arrow key from parking the list past its
+     * end and keeps the cursor on screen while it moves.
+     */
+    ListWindow clamp_window(ViewState& view, int total_rows, int viewport_rows) const;
+
+    /**
+     * @brief How many rows are still free below what has been written.
+     *
+     * Counts the newlines already in the frame instead of subtracting a
+     * hand-counted constant, so a view that gains or loses a line does not
+     * silently start clipping its list — the constants drifted out of date the
+     * moment any section above them changed.
+     *
+     * @param reserve Rows to keep for whatever is printed after the list.
+     */
+    int rows_left(const std::ostringstream& out, int height, int reserve) const;
+
+    // Full-screen focus views
+    void render_overview(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width);
+    void render_cpu_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, ViewState& view, int width, int height);
+    void render_memory_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width);
+    void render_gpu_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width);
+    void render_disk_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, ViewState& view, int width, int height);
+    void render_network_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, ViewState& view, int width, int height);
+    void render_connections_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, ViewState& view, int width, int height);
+    void render_processes_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, ViewState& view, int width, int height);
+    void render_sensors_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, ViewState& view, int width, int height);
+    void render_process_detail_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, ViewState& view, int width, int height);
+
+    /** @brief The strip of view names across the top of a focus view. */
+    void render_view_bar(std::ostringstream& out, const ViewState& view, const Config& cfg, int width);
+
+    /** @brief "rows 20-40 of 771" plus the scroll hints, under a long list. */
+    void render_list_status(std::ostringstream& out, const ListWindow& window,
+                            const std::string& noun, const ViewState& view, int width);
+
+    /** @brief A "Label  value" line, skipped entirely when the value is empty. */
+    void kv(std::ostringstream& out, const std::string& label, const std::string& value, int width);
+
+    /**
+     * @brief A "Label [====    ]  42.0 %" row that always fits @p width.
+     *
+     * One place for the arithmetic: six views drew this row with their own
+     * hand-tuned constants, and each one was its own chance to overflow a
+     * narrow terminal.
+     */
+    void bar_row(std::ostringstream& out, const std::string& label, double percent, int width);
 
     // Section renderers
     void render_header(std::ostringstream& out, const SystemStats& sys, int width, bool compact);

@@ -301,10 +301,98 @@ struct ProcessStats {
     double       cpu_time_seconds{0.0};///< Accumulated user+system CPU time
     std::optional<int>      nice;
     std::optional<uint64_t> open_files;
-    std::optional<double>   io_read_bytes_per_sec;
+    std::optional<double>   io_read_bytes_per_sec;   ///< Bytes actually hitting the device
     std::optional<double>   io_write_bytes_per_sec;
-    double       rx_bytes_per_sec{0.0};  ///< Network rx (best-effort)
-    double       tx_bytes_per_sec{0.0};
+    std::optional<uint64_t> io_read_bytes_total;
+    std::optional<uint64_t> io_write_bytes_total;
+
+    /// Per-process network throughput.
+    ///
+    /// Transmit is available on macOS, where `netstat -anv` reports cumulative
+    /// per-socket byte counters next to the owning process without privileges.
+    /// Linux's /proc/net/tcp carries no byte counters and the Windows EStats
+    /// API needs administrator rights, so both stay empty there.
+    ///
+    /// Receive is empty everywhere: the macOS rxbytes column advances at
+    /// almost exactly twice the bytes an application receives (measured:
+    /// 21005632 for an exact 10485760-byte transfer), and correcting for that
+    /// would be a guess calibrated on one machine.
+    ///
+    /// Empty rather than zero throughout, because a zero here reads as "this
+    /// process used no network".
+    std::optional<double>   rx_bytes_per_sec;
+    std::optional<double>   tx_bytes_per_sec;
+    std::optional<unsigned int> socket_count;  ///< Open sockets, when countable
+};
+
+/**
+ * @brief One file, socket or pipe a process holds open.
+ *
+ * Collected on demand for a single process, never for the whole table: reading
+ * several hundred processes' descriptor tables once per refresh costs far more
+ * than the dashboard is worth.
+ */
+struct OpenFile {
+    int         fd{-1};
+    std::string path;          ///< Resolved path, or a synthetic name for sockets
+    std::string type;          ///< "file", "dir", "socket", "pipe", "chr", …
+    std::string mode;          ///< "r", "w", "rw" where known
+    std::optional<uint64_t> size_bytes;
+    std::optional<uint64_t> position;
+};
+
+/** @brief Why a per-process descriptor listing came back empty. */
+enum class OpenFilesStatus {
+    Ok,              ///< The list is complete (it may legitimately be empty)
+    PermissionDenied,///< Another user's process; the kernel refused
+    Unsupported,     ///< No unprivileged interface on this platform
+    NoSuchProcess    ///< It exited between selection and inspection
+};
+
+/** @brief Result of inspecting one process's descriptor table. */
+struct OpenFilesResult {
+    OpenFilesStatus       status{OpenFilesStatus::Unsupported};
+    std::vector<OpenFile> files;
+
+    /// Human-readable reason, for rendering in place of the list.
+    std::string reason() const {
+        switch (status) {
+            case OpenFilesStatus::Ok:               return "";
+            case OpenFilesStatus::PermissionDenied: return "permission denied (process owned by another user)";
+            case OpenFilesStatus::Unsupported:      return "not available on this platform";
+            case OpenFilesStatus::NoSuchProcess:    return "process exited";
+        }
+        return "";
+    }
+};
+
+/**
+ * @brief How much of each section to show.
+ *
+ * A single ladder rather than a compact/not-compact flag: the useful density
+ * for a 24-line laptop terminal, a full-screen window and a screenshot for a
+ * bug report are three different things, and every renderer honours the same
+ * scale.
+ */
+enum class DetailLevel {
+    Compact = 0,  ///< One line per subsystem; fits a small pane
+    Normal,       ///< The default dashboard
+    Detailed,     ///< Every field the section has a layout for
+    Full          ///< Detailed plus the long tails: all cores, all sensors, flags
+};
+
+/** @brief Which subsystem the dashboard is focused on. */
+enum class View {
+    Overview = 0, ///< Every enabled section, as before
+    Cpu,          ///< One subsystem, using the whole screen
+    Memory,
+    Gpu,
+    Disk,
+    Network,
+    Connections,
+    Processes,
+    Sensors,
+    Process       ///< Inspector for one selected process
 };
 
 /** @brief Sort order for the process table. */
@@ -390,11 +478,49 @@ struct Snapshot {
     NetGlobalStats                    net_global;
     std::vector<NetConnectionStats>   connections;
     std::vector<ProcessStats>         processes;
+
+    /// Descriptor table of the process the inspector is open on.
+    ///
+    /// Populated only while View::Process is active: reading several hundred
+    /// processes' open files once per refresh costs orders of magnitude more
+    /// than every other monitor combined.
+    std::optional<OpenFilesResult>    selected_process_files;
 };
 
 // ===========================================================================
 // Configuration snapshot (passed to renderers)
 // ===========================================================================
+
+/**
+ * @brief Everything the dashboard tracks that is *not* a setting.
+ *
+ * Kept apart from Config on purpose: the detail level and the view a user
+ * starts in belong in the config file, but a scroll offset and a selection do
+ * not — writing those on [s] would mean reopening the dashboard scrolled to
+ * wherever it was left.
+ */
+struct ViewState {
+    View view{View::Overview};
+
+    /// Row the cursor is on, as an absolute index into the focused list.
+    /// Moved by the key handler, clamped by the renderer — only the renderer
+    /// knows how many rows the list actually has.
+    int  cursor{0};
+
+    /// First visible row.  Derived by the renderer from the cursor and the
+    /// viewport height rather than set directly, so the cursor is always on
+    /// screen.
+    int  scroll_offset{0};
+
+    /// PID under the cursor in the process list, written back by the renderer.
+    ///
+    /// The inspector keys off this rather than off the row index, because the
+    /// table re-sorts on every refresh and a fixed index would follow whatever
+    /// process happened to land on that row.
+    int  selected_pid{-1};
+
+    bool show_all{false};       ///< Ignore the display limits in list views
+};
 
 /** @brief Which sections to display — derived from Config at render time. */
 struct DisplayFlags {

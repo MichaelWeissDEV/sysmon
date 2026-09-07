@@ -34,8 +34,8 @@ unmeasurable metric is `null`, never `0`.
 | Sensors | All temperature sensors with labels and thresholds, fan tachometers, hottest-sensor summary |
 | Disk | Per-filesystem usage, inodes, mount options, read-only/removable flags; per-device throughput, IOPS, utilisation and average latency |
 | Network | Per-interface throughput, packets, errors, drops, MAC, MTU, link speed, duplex, IPv4/IPv6; default gateway, DNS servers, socket-state census |
-| Processes | PID/PPID, user, state, CPU%, accumulated CPU time, RSS/VIRT, threads, nice, open files, per-process disk I/O, command line |
-| Output | Live TUI with sparklines, one-shot plain text, and full JSON |
+| Processes | PID/PPID, user, state, CPU%, accumulated CPU time, RSS/VIRT, threads, nice, open file count and paths, per-process disk I/O rate and lifetime totals, socket count, upload rate, command line |
+| Output | Live TUI with nine views and four density levels, one-shot plain text, and full JSON |
 
 ### Platform metric availability
 
@@ -56,6 +56,10 @@ reported as `N/A` rather than guessed:
 | Per-process I/O | ✓ | ✓ | ✓ |
 | Connections with PID | ✓ | ✓ | ✓ |
 | Battery | ✓ | ✓ | ✓ (charge and runtime only) |
+| Per-process open files | ✓ (own processes) | ✓ (own processes) | N/A |
+| Per-process upload rate | N/A | ✓ | N/A — EStats needs admin |
+| Per-process download rate | N/A | N/A — counter double-counts | N/A |
+| Per-process socket count | ✓ (own processes) | ✓ | ✓ |
 
 ## Quick Start
 
@@ -81,9 +85,13 @@ Output Modes:
   --no-tui               Plain text output (no ANSI formatting)
   --json                 Emit one JSON snapshot and exit (implies --once)
   --json-compact         As --json, but on a single line
-  --compact, -m          Compact / summary dashboard mode
+  --compact, -m          Shorthand for --detail compact
+  --detail LEVEL         Density: compact, normal, detailed, full
+  --view NAME            Start in: overview, cpu, memory, gpu, disk,
+                         network, connections, processes, sensors
   --interval N, -i N     Update interval in seconds (default: 2)
-  --limit N              Max number of processes to display
+  --limit N              Max processes to display (0 = all)
+  --all                  Show every process and connection, no limits
   --sort KEY             Process sort: cpu, mem, pid, name, time
 
 Component Visibility Toggles:
@@ -183,10 +191,56 @@ sysmon --json | jq '.processes | sort_by(-.mem_rss_bytes) | .[0:5] | .[].name'
 sysmon --json-compact >> metrics.ndjson   # one line per sample, append-friendly
 ```
 
+## Views
+
+The dashboard opens on an overview of every section. Pressing a digit switches
+to a full-screen view of one subsystem, which shows the fields the overview has
+no room for and, where the list is long, scrolls.
+
+| Key | View | What it adds over the overview |
+|-----|------|-------------------------------|
+| `0` | Overview | Every enabled section, as before |
+| `1` | CPU | Topology, P/E clusters, cache sizes, all cores (scrollable), context switches, instruction set |
+| `2` | Memory | Active/inactive/wired/compressed, slab, dirty, commit charge, paging and swap rates, largest consumers |
+| `3` | GPU | Per adapter: driver, cores, VRAM, core and memory clocks, encoder/decoder, power, fan |
+| `4` | Disk | Inodes, mount options, per-device IOPS, utilisation, latency, queue depth, and the processes doing the I/O |
+| `5` | Network | Per interface MAC, MTU, duplex, link speed, totals, errors and drops; gateway, DNS, upload by process |
+| `6` | Connections | Every socket with its owning process, scrollable |
+| `7` | Processes | The full process table, scrollable, with disk I/O and CPU time columns |
+| `8` | Sensors | Every temperature sensor with its thresholds, fans, and battery detail |
+
+Inside a list view, `Enter` opens an inspector for the selected process: its
+full command line, accumulated CPU time, cumulative and current disk I/O, its
+own connections, and the files it has open.
+
+## Density
+
+Four levels, changed live with `+` and `-` or set with `--detail`:
+
+| Level | Meaning |
+|-------|---------|
+| `compact` | One line per subsystem — fits a small pane |
+| `normal` | The default dashboard |
+| `detailed` | Every field a section has a layout for |
+| `full` | Detailed plus the long tails: all cores, all sensors, CPU flags, command lines |
+
+The level applies to the plain-text output too, so `--once --no-tui --detail full`
+prints everything sysmon can lay out as text.
+
 ## Keyboard Shortcuts (TUI Mode)
 
 | Key | Action |
 |-----|--------|
+| `0`–`8` | Switch to that view |
+| `Tab` | Next view |
+| `Esc` | Back to the overview; quits from the overview |
+| `+` / `-` | More / less detail |
+| `m` | Toggle compact density |
+| `↑` `↓` / `k` `j` | Move the cursor in a list |
+| `PgUp` / `PgDn` | Page through a list |
+| `Home` / `End` | Jump to the start / end |
+| `Enter` | Inspect the selected process |
+| `a` | Show all — lift the process and connection limits |
 | `c` | Toggle per-core CPU |
 | `g` | Toggle GPU |
 | `n` | Toggle network |
@@ -195,11 +249,10 @@ sysmon --json-compact >> metrics.ndjson   # one line per sample, append-friendly
 | `t` | Toggle temperatures |
 | `d` | Toggle storage |
 | `b` | Toggle battery |
-| `m` | Toggle compact mode |
 | `o` | Cycle process sort order |
 | `s` | Save current settings to config |
 | `r` | Force refresh |
-| `q` / `Esc` / `Ctrl+C` | Quit |
+| `q` / `Ctrl+C` | Quit |
 
 ## Building
 

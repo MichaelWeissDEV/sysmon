@@ -65,6 +65,55 @@ std::string Config::sort_name(ProcSort sort) {
     }
 }
 
+std::optional<DetailLevel> Config::parse_detail(const std::string& name) {
+    const std::string lower = utils::to_lower(utils::trim(name));
+    if (lower == "compact"  || lower == "min" || lower == "0") return DetailLevel::Compact;
+    if (lower == "normal"   || lower == "1")                   return DetailLevel::Normal;
+    if (lower == "detailed" || lower == "detail" || lower == "2") return DetailLevel::Detailed;
+    if (lower == "full"     || lower == "max" || lower == "3") return DetailLevel::Full;
+    return std::nullopt;
+}
+
+std::string Config::detail_name(DetailLevel level) {
+    switch (level) {
+        case DetailLevel::Compact:  return "compact";
+        case DetailLevel::Detailed: return "detailed";
+        case DetailLevel::Full:     return "full";
+        case DetailLevel::Normal:
+        default:                    return "normal";
+    }
+}
+
+std::optional<View> Config::parse_view(const std::string& name) {
+    const std::string lower = utils::to_lower(utils::trim(name));
+    if (lower == "overview" || lower == "all")  return View::Overview;
+    if (lower == "cpu")                          return View::Cpu;
+    if (lower == "memory" || lower == "mem" || lower == "ram") return View::Memory;
+    if (lower == "gpu")                          return View::Gpu;
+    if (lower == "disk" || lower == "storage")   return View::Disk;
+    if (lower == "network" || lower == "net")    return View::Network;
+    if (lower == "connections" || lower == "conn") return View::Connections;
+    if (lower == "processes" || lower == "proc") return View::Processes;
+    if (lower == "sensors" || lower == "temp" || lower == "temperature") return View::Sensors;
+    return std::nullopt;
+}
+
+std::string Config::view_name(View view) {
+    switch (view) {
+        case View::Cpu:         return "cpu";
+        case View::Memory:      return "memory";
+        case View::Gpu:         return "gpu";
+        case View::Disk:        return "disk";
+        case View::Network:     return "network";
+        case View::Connections: return "connections";
+        case View::Processes:   return "processes";
+        case View::Sensors:     return "sensors";
+        case View::Process:     return "process";
+        case View::Overview:
+        default:                return "overview";
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parser helpers
 // ---------------------------------------------------------------------------
@@ -119,6 +168,12 @@ Config Config::load_from(const std::string& path) {
     std::string section;
     std::string line;
 
+    // detail_level supersedes compact_mode.  A file may carry either, or both
+    // if it was written by an older sysmon and then edited, so remember what
+    // the boolean said and apply it only when the enum is absent.
+    std::optional<bool> compact_mode_from_file;
+    bool saw_detail_level = false;
+
     while (std::getline(file, line)) {
         line = utils::trim(strip_comment(line));
         if (line.empty()) continue;
@@ -144,7 +199,11 @@ Config Config::load_from(const std::string& path) {
             if (key == "refresh_interval") {
                 if (auto v = parse_int(val)) cfg.refresh_interval = v.value();
             } else if (key == "tui_enabled")           cfg.tui_enabled = parse_bool(val);
-            else if (key == "compact_mode")          cfg.compact_mode = parse_bool(val);
+            else if (key == "compact_mode") {
+                // Superseded by detail_level, still honoured: a config file
+                // written by an older sysmon has only this key.
+                compact_mode_from_file = parse_bool(val);
+            }
             else if (key == "show_cpu")              cfg.show_cpu = parse_bool(val);
             else if (key == "show_cpu_per_core")     cfg.show_cpu_per_core = parse_bool(val);
             else if (key == "show_cpu_cores_detail") cfg.show_cpu_cores_detail = parse_bool(val);
@@ -175,6 +234,15 @@ Config Config::load_from(const std::string& path) {
             else if (key == "proc_sort") {
                 if (auto v = parse_sort(val)) cfg.proc_sort = v.value();
             }
+            else if (key == "detail_level") {
+                if (auto v = parse_detail(val)) {
+                    cfg.detail_level = v.value();
+                    saw_detail_level = true;
+                }
+            }
+            else if (key == "start_view") {
+                if (auto v = parse_view(val)) cfg.start_view = v.value();
+            }
         }
         // ---- [tui] ----
         else if (section == "tui") {
@@ -200,6 +268,10 @@ Config Config::load_from(const std::string& path) {
         }
     }
 
+    if (compact_mode_from_file.has_value() && !saw_detail_level) {
+        cfg.detail_level = *compact_mode_from_file ? DetailLevel::Compact
+                                                   : DetailLevel::Normal;
+    }
     return cfg;
 }
 
@@ -240,7 +312,13 @@ void Config::save_to(const std::string& path) const {
     f << "[display]\n"
       << "refresh_interval = " << refresh_interval << "\n"
       << "tui_enabled = " << bool_str(tui_enabled) << "\n"
-      << "compact_mode = " << bool_str(compact_mode) << "\n\n"
+      << "# How much of each section to show: compact, normal, detailed, full\n"
+      << "detail_level = " << detail_name(detail_level) << "\n"
+      << "# compact_mode = true is still read, as the old spelling of\n"
+      << "# detail_level = compact; detail_level wins when both are present.\n"
+      << "# View the dashboard opens in: overview, cpu, memory, gpu, disk,\n"
+      << "# network, connections, processes, sensors\n"
+      << "start_view = " << view_name(start_view) << "\n\n"
       << "# CPU\n"
       << "show_cpu = " << bool_str(show_cpu) << "\n"
       << "show_cpu_per_core = " << bool_str(show_cpu_per_core) << "\n"
@@ -318,7 +396,7 @@ std::string Config::to_string() const {
     oss << "Config {\n"
         << "  refresh_interval         = " << refresh_interval << "\n"
         << "  tui_enabled              = " << bool_str(tui_enabled) << "\n"
-        << "  compact_mode             = " << bool_str(compact_mode) << "\n"
+        << "  compact_mode             = " << bool_str(compact_mode()) << "\n"
         << "  show_cpu                 = " << bool_str(show_cpu) << "\n"
         << "  show_cpu_per_core        = " << bool_str(show_cpu_per_core) << "\n"
         << "  show_memory              = " << bool_str(show_memory) << "\n"
@@ -332,6 +410,8 @@ std::string Config::to_string() const {
         << "  show_battery             = " << bool_str(show_battery) << "\n"
         << "  show_processes           = " << bool_str(show_processes) << "\n"
         << "  proc_sort                = " << sort_name(proc_sort) << "\n"
+        << "  detail_level             = " << detail_name(detail_level) << "\n"
+        << "  start_view               = " << view_name(start_view) << "\n"
         << "  proc_limit               = " << proc_limit << "\n"
         << "  connections_limit        = " << connections_limit << "\n"
         << "}\n";
@@ -360,7 +440,7 @@ DisplayFlags Config::to_display_flags() const {
     f.network_per_iface     = show_network_per_iface;
     f.connections           = show_connections;
     f.processes             = show_processes;
-    f.compact               = compact_mode;
+    f.compact               = compact_mode();
     f.proc_limit            = proc_limit;
     return f;
 }

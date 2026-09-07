@@ -21,6 +21,50 @@ struct Size {
 };
 
 /**
+ * @brief A decoded keystroke.
+ *
+ * Arrow, navigation and function keys arrive as multi-byte sequences that mean
+ * nothing to a caller comparing single characters, and on POSIX every one of
+ * them starts with the same byte as the Escape key.  Decoding happens here so
+ * no caller has to know that.
+ */
+enum class Key {
+    None = 0,   ///< Nothing was pending
+    Char,       ///< A printable character; see KeyEvent::ch
+    Enter,
+    Escape,
+    Tab,
+    Backspace,
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Delete,
+    Insert,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12
+};
+
+/** @brief One keystroke: a Key, plus the character when Key::Char. */
+struct KeyEvent {
+    Key  key{Key::None};
+    char ch{0};
+
+    /** @brief True when this is the given printable character. */
+    bool is(char c) const { return key == Key::Char && ch == c; }
+
+    /** @brief True when this is either case of the given letter. */
+    bool is_either(char lower, char upper) const {
+        return key == Key::Char && (ch == lower || ch == upper);
+    }
+
+    explicit operator bool() const { return key != Key::None; }
+};
+
+/**
  * @brief Prepare the terminal for output.
  *
  * On Windows: switches the console to UTF-8 and enables virtual-terminal
@@ -51,11 +95,17 @@ bool enable_raw_input();
 void disable_raw_input();
 
 /**
- * @brief Read one pending keystroke without blocking.
+ * @brief Read one pending keystroke, decoding escape sequences.
  *
- * @return the character, or -1 when no key is available.
+ * Never blocks waiting for a *first* byte.  It does wait briefly (a few tens of
+ * milliseconds) after an Escape to see whether a sequence introducer follows,
+ * because that is the only way to tell the Escape key from the first byte of
+ * an arrow key; a terminal sends the rest of the sequence in the same burst, so
+ * the wait is bounded and only pays out on an actual Escape press.
+ *
+ * @return a KeyEvent whose key is Key::None when nothing was pending.
  */
-int read_key();
+KeyEvent read_key_event();
 
 /** @brief Current terminal size, falling back to 80x24 when unknown. */
 Size size();

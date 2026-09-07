@@ -30,7 +30,17 @@ struct Config {
     // ------------------------------------------------------------------
     int  refresh_interval{2};       ///< Seconds between TUI/CLI refreshes
     bool tui_enabled{true};         ///< Use live TUI (false = one-shot)
-    bool compact_mode{false};       ///< Condensed single-line sections
+
+    /// How much of each section to render.
+    ///
+    /// The single stored spelling of this setting.  `--compact` and a config
+    /// file's `compact_mode` are still accepted and map onto
+    /// DetailLevel::Compact; keeping a second boolean field alongside meant
+    /// the two could disagree, and then whichever one a given renderer
+    /// happened to read decided the layout.
+    DetailLevel detail_level{DetailLevel::Normal};
+
+    View start_view{View::Overview};///< Which view the dashboard opens in
 
     // CPU
     bool show_cpu{true};
@@ -118,6 +128,24 @@ struct Config {
 
     /** @brief Parse a sort name ("cpu", "mem", "pid", "name", "time"). */
     static std::optional<ProcSort> parse_sort(const std::string& name);
+
+    /** @brief Parse a detail level ("compact", "normal", "detailed", "full"). */
+    static std::optional<DetailLevel> parse_detail(const std::string& name);
+
+    /** @brief Name of a detail level, as accepted by parse_detail(). */
+    static std::string detail_name(DetailLevel level);
+
+    /** @brief Parse a view name ("overview", "cpu", "memory", …). */
+    static std::optional<View> parse_view(const std::string& name);
+
+    /** @brief Name of a view, as accepted by parse_view(). */
+    static std::string view_name(View view);
+
+    /** @brief True at the lowest density, where sections collapse to one line. */
+    bool compact_mode() const { return detail_level == DetailLevel::Compact; }
+
+    /** @brief True when the level is at least @p level. */
+    bool at_least(DetailLevel level) const { return detail_level >= level; }
 
     /** @brief Name of a sort order, as accepted by parse_sort(). */
     static std::string sort_name(ProcSort sort);

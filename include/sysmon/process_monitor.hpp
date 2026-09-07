@@ -40,6 +40,23 @@ public:
     /** @brief Order a process list in place. Exposed for testing. */
     static void sort_processes(std::vector<ProcessStats>& procs, ProcSort sort);
 
+    /**
+     * @brief List the files, sockets and pipes one process has open.
+     *
+     * Deliberately per-process and on demand.  Walking every process's
+     * descriptor table would mean thousands of readlink() calls per refresh —
+     * far more expensive than the rest of sysmon put together — and it is only
+     * ever one process a user wants to look inside.
+     *
+     * The kernel refuses another user's process to an unprivileged caller.
+     * That comes back as OpenFilesStatus::PermissionDenied rather than as an
+     * empty list, because "this process has no files open" and "you may not
+     * look" are different answers.
+     *
+     * @param pid Process to inspect.
+     */
+    static OpenFilesResult open_files(int pid);
+
 private:
     struct ProcSnapshot {
         unsigned long long utime{0};

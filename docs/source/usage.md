@@ -12,23 +12,86 @@ Launch the full-screen interactive monitor:
 sysmon
 ```
 
-### In-TUI Interactive Controls
+### Views
 
-Press any of the following keys at runtime to toggle components on and off immediately:
+The dashboard opens on an overview of every enabled section. A digit switches to
+a full-screen view of one subsystem, which has room for the fields the overview
+leaves out and scrolls when the list is longer than the screen.
 
-- **`c`** : Toggle individual CPU Core usage bars
-- **`g`** : Toggle GPU / Graphics stats and VRAM / Unified Memory
-- **`n`** : Toggle Network interfaces and live sparklines
-- **`v`** : Toggle Active Network Connections table
-- **`p`** : Toggle Top Processes table
-- **`t`** : Toggle Temperatures and Hardware Sensors
-- **`d`** : Toggle Filesystems & Disk I/O read/write rates
-- **`b`** : Toggle Battery & Power
-- **`o`** : Cycle the process sort order (cpu → mem → time → pid → name)
-- **`m`** : Toggle **Compact Mode** (switches between full granular view and summary dashboard)
-- **`s`** : **Save** your current display choices to the config file location
-- **`r`** : Force immediate refresh
-- **`q`** / **`ESC`** : Quit
+| Key | View | What the focus view adds |
+|-----|------|--------------------------|
+| `0` | Overview | Every enabled section |
+| `1` | CPU | Socket/core/thread topology, P and E clusters, cache sizes, every core in a scrollable table, context-switch and interrupt rates, instruction-set flags |
+| `2` | Memory | Active, inactive, wired, compressed, shared, slab and dirty; commit charge; page-fault, paging and swap rates; the processes holding the most memory |
+| `3` | GPU | Per adapter: driver, core count, VRAM total/used/free, core and memory clocks, encoder and decoder load, temperature, power, fan |
+| `4` | Disk | Inode usage, mount options, read-only and removable flags; per-device IOPS, utilisation, average latency and queue depth; the processes doing the I/O |
+| `5` | Network | Per interface MAC, MTU, duplex, link speed, lifetime totals, errors and drops; default gateway, DNS servers, socket census; upload by process |
+| `6` | Connections | Every socket with its state and owning process, scrollable |
+| `7` | Processes | The whole process table, scrollable, with CPU time and per-process disk I/O |
+| `8` | Sensors | Every temperature sensor with its high and critical thresholds, fan tachometers, and full battery detail |
+
+`Tab` cycles the views in that order. `Esc` steps back to the overview, and
+quits only from the overview — so a mistyped view change is not a quit.
+
+### Inspecting one process
+
+In the process view, `↑`/`↓` move a cursor and `Enter` opens an inspector for
+the selected process. The cursor follows the process, not the row: the table
+re-sorts on every refresh, so a fixed row would select a different process each
+frame.
+
+The inspector shows the full command line, parent PID, nice level, accumulated
+CPU time, resident and virtual memory, disk read and write rates alongside the
+lifetime totals, the process's own network connections, and the files, sockets
+and pipes it currently has open. Descriptor tables are read for the inspected
+process only — walking several hundred processes' descriptors once per refresh
+would cost more than every other monitor combined.
+
+Another user's process is refused by the kernel. That is reported as
+`permission denied`, distinct from an empty list, because "this process has no
+files open" and "you may not look" are different answers.
+
+### Density
+
+Four levels, changed live with `+` and `-`:
+
+| Level | Meaning |
+|-------|---------|
+| `compact` | One line per subsystem — fits a small pane |
+| `normal` | The default dashboard |
+| `detailed` | Every field a section has a layout for |
+| `full` | Detailed plus the long tails: all cores, all sensors, CPU flags, command lines |
+
+`m` toggles between compact and normal. The level applies to the plain-text
+output as well, so `--once --no-tui --detail full` prints everything sysmon can
+lay out as text.
+
+### All the interactive keys
+
+| Key | Action |
+|-----|--------|
+| `0`–`8` | Switch to that view |
+| `Tab` | Next view |
+| `Esc` | Back to the overview; quits from the overview |
+| `+` / `-` | More / less detail |
+| `m` | Toggle compact density |
+| `↑` `↓` / `k` `j` | Move the cursor in a list |
+| `PgUp` / `PgDn` | Page through a list |
+| `Home` / `End` | Jump to the start / end of a list |
+| `Enter` | Inspect the selected process |
+| `a` | Show all — lift the process and connection limits |
+| `c` | Toggle individual CPU core bars |
+| `g` | Toggle GPU and VRAM |
+| `n` | Toggle network interfaces and sparklines |
+| `v` | Toggle the connections table |
+| `p` | Toggle the process table |
+| `t` | Toggle temperatures and sensors |
+| `d` | Toggle filesystems and disk I/O |
+| `b` | Toggle battery and power |
+| `o` | Cycle the process sort order (cpu → mem → time → pid → name) |
+| `s` | Save the current display choices to the config file |
+| `r` | Force an immediate refresh |
+| `q` / `Ctrl+C` | Quit |
 
 ---
 
@@ -72,6 +135,13 @@ sysmon --no-disk --no-proc --no-conn
 
 # Start in compact summary mode
 sysmon --compact
+
+# Open directly on one subsystem, at full detail
+sysmon --view processes --detail full
+sysmon --view network --detail detailed
+
+# Every process and every connection, no limits
+sysmon --all
 
 # Show top 50 processes with a fast 1-second refresh rate
 sysmon --limit 50 --interval 1

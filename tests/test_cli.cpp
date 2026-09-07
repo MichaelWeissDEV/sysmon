@@ -206,3 +206,92 @@ TEST(CliJsonExportTest, ExplicitLimitIsStillHonoured) {
     ASSERT_EQ(code, 0) << out;
     EXPECT_EQ(count_occurrences(out, "{\"pid\":"), 2u) << out.substr(0, 200);
 }
+
+TEST(CliViewTest, DetailLevelsAreAccepted) {
+    for (const char* level : {"compact", "normal", "detailed", "full"}) {
+        int code = -1;
+        const std::string out = run(
+            std::string(SYSMON_BINARY_PATH) + " --once --no-tui --limit 3 --detail " + level, code);
+        EXPECT_EQ(code, 0) << level << ": " << out;
+        EXPECT_FALSE(out.empty()) << level;
+    }
+}
+
+TEST(CliViewTest, ViewNamesAreAccepted) {
+    for (const char* view : {"overview", "cpu", "memory", "gpu", "disk",
+                             "network", "connections", "processes", "sensors"}) {
+        int code = -1;
+        const std::string out = run(
+            std::string(SYSMON_BINARY_PATH) + " --once --no-tui --limit 3 --view " + view, code);
+        EXPECT_EQ(code, 0) << view << ": " << out;
+    }
+}
+
+TEST(CliViewTest, InvalidDetailAndViewAreRejected) {
+    int code = -1;
+    std::string out = run(std::string(SYSMON_BINARY_PATH) + " --detail enormous 2>&1", code);
+    EXPECT_NE(code, 0) << out;
+    EXPECT_NE(out.find("unknown detail level"), std::string::npos) << out;
+
+    out = run(std::string(SYSMON_BINARY_PATH) + " --view kitchen-sink 2>&1", code);
+    EXPECT_NE(code, 0) << out;
+    EXPECT_NE(out.find("unknown view"), std::string::npos) << out;
+
+    out = run(std::string(SYSMON_BINARY_PATH) + " --detail 2>&1", code);
+    EXPECT_NE(code, 0) << out;
+}
+
+TEST(CliViewTest, CompactTextOutputIsActuallyCompact) {
+    // --compact was accepted and then ignored in text mode, so the flag looked
+    // as though it had worked while the output was byte-identical.
+    int code = -1;
+    const std::string full = run(
+        std::string(SYSMON_BINARY_PATH) + " --once --no-tui --limit 5", code);
+    ASSERT_EQ(code, 0) << full;
+    const std::string compact = run(
+        std::string(SYSMON_BINARY_PATH) + " --once --no-tui --compact", code);
+    ASSERT_EQ(code, 0) << compact;
+
+    EXPECT_LT(count_occurrences(compact, "\n"), count_occurrences(full, "\n"))
+        << "--compact produced no fewer lines than the default output";
+    EXPECT_LT(compact.size(), full.size());
+}
+
+TEST(CliViewTest, DetailedTextOutputAddsColumnsRatherThanRemovingThem) {
+    int code = -1;
+    const std::string normal = run(
+        std::string(SYSMON_BINARY_PATH) + " --once --no-tui --limit 5", code);
+    ASSERT_EQ(code, 0);
+    const std::string detailed = run(
+        std::string(SYSMON_BINARY_PATH) + " --once --no-tui --limit 5 --detail detailed", code);
+    ASSERT_EQ(code, 0);
+
+    EXPECT_EQ(normal.find("NICE"), std::string::npos) << "NICE leaked into the normal table";
+    EXPECT_NE(detailed.find("NICE"), std::string::npos);
+    EXPECT_NE(detailed.find("DISK R"), std::string::npos);
+    EXPECT_GT(detailed.size(), normal.size());
+}
+
+TEST(CliViewTest, AllShowsEveryProcessAndConnection) {
+    // --limit 0 used to mean "print nothing" in the display loops, so --all
+    // produced an empty table.
+    int code = -1;
+    const std::string limited = run(
+        std::string(SYSMON_BINARY_PATH) + " --once --no-tui --limit 5", code);
+    ASSERT_EQ(code, 0);
+    const std::string all = run(
+        std::string(SYSMON_BINARY_PATH) + " --once --no-tui --all", code);
+    ASSERT_EQ(code, 0) << all;
+
+    EXPECT_NE(all.find("Processes (all "), std::string::npos)
+        << "--all did not lift the process limit";
+    EXPECT_GT(all.size(), limited.size());
+}
+
+TEST(CliViewTest, ZeroLimitMeansEverythingNotNothing) {
+    int code = -1;
+    const std::string out = run(
+        std::string(SYSMON_BINARY_PATH) + " --once --no-tui --limit 0", code);
+    ASSERT_EQ(code, 0) << out;
+    EXPECT_NE(out.find("Processes (all "), std::string::npos) << out.substr(0, 300);
+}

@@ -19,9 +19,34 @@ TEST(TerminalTest, RawInputIsNotEnteredWhenStdinIsNotATty) {
         GTEST_SKIP() << "stdin is a terminal; this check needs a redirected stdin";
     }
     EXPECT_FALSE(terminal::enable_raw_input());
-    // read_key() must not block or read anything when raw mode is not active.
-    EXPECT_EQ(terminal::read_key(), -1);
+    // Key reads must not block or consume anything when raw mode is not active.
+    EXPECT_EQ(terminal::read_key_event().key, terminal::Key::None);
     terminal::disable_raw_input();   // must be a no-op, not a crash
+}
+
+TEST(TerminalTest, KeyEventDefaultsToNothingPending) {
+    const terminal::KeyEvent none;
+    EXPECT_EQ(none.key, terminal::Key::None);
+    EXPECT_FALSE(static_cast<bool>(none));
+    EXPECT_FALSE(none.is('q'));
+    EXPECT_FALSE(none.is_either('q', 'Q'));
+}
+
+TEST(TerminalTest, KeyEventComparesCharactersBothWays) {
+    terminal::KeyEvent ev;
+    ev.key = terminal::Key::Char;
+    ev.ch  = 'Q';
+    EXPECT_TRUE(static_cast<bool>(ev));
+    EXPECT_TRUE(ev.is('Q'));
+    EXPECT_FALSE(ev.is('q'));
+    EXPECT_TRUE(ev.is_either('q', 'Q'));
+
+    // A named key is never a character, however it is compared.
+    terminal::KeyEvent up;
+    up.key = terminal::Key::Up;
+    EXPECT_FALSE(up.is('A'));          // 'A' is the final byte of ESC [ A
+    EXPECT_FALSE(up.is_either('a', 'A'));
+    EXPECT_TRUE(static_cast<bool>(up));
 }
 
 TEST(TerminalTest, SizeAlwaysReturnsUsableDimensions) {

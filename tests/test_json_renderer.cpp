@@ -123,3 +123,46 @@ TEST(JsonRendererTest, EmptySnapshotStillProducesValidDocument) {
     EXPECT_TRUE(structurally_valid(json)) << json;
     EXPECT_NE(json.find("\"processes\""), std::string::npos);
 }
+
+TEST(JsonRendererTest, PerProcessBandwidthIsNullWhenUnattributed) {
+    // A process whose network use could not be attributed must be null, not 0:
+    // "sent nothing" and "no counter exists for this platform" are different
+    // answers, and only one of them is a measurement.
+    Snapshot snap = make_snapshot();
+    ProcessStats& p = snap.processes.back();
+    p.rx_bytes_per_sec    = std::nullopt;
+    p.tx_bytes_per_sec    = std::nullopt;
+    p.socket_count        = std::nullopt;
+    p.io_read_bytes_total = std::nullopt;
+
+    JsonRenderer renderer;
+    const std::string json = renderer.to_string(snap, Config::defaults());
+
+    EXPECT_TRUE(structurally_valid(json)) << json;
+    for (const char* key : {"rx_bytes_per_sec", "tx_bytes_per_sec",
+                            "socket_count", "io_read_bytes_total"}) {
+        const std::string needle = std::string("\"") + key + "\": null";
+        EXPECT_NE(json.find(needle), std::string::npos) << key << " was not null:\n" << json;
+    }
+
+    // A measured value must survive as a number.
+    p.tx_bytes_per_sec = 2048.0;
+    p.socket_count     = 3u;
+    const std::string measured = renderer.to_string(snap, Config::defaults());
+    EXPECT_NE(measured.find("\"tx_bytes_per_sec\": 2048.0"), std::string::npos) << measured;
+    EXPECT_NE(measured.find("\"socket_count\": 3"), std::string::npos) << measured;
+}
+
+TEST(JsonRendererTest, DetailLevelDoesNotChangeTheExport) {
+    // --json is a data export, not a view: the density that shapes the
+    // dashboard must not decide which fields a consumer receives.
+    const Snapshot snap = make_snapshot();
+    JsonRenderer renderer;
+
+    Config compact = Config::defaults();
+    compact.detail_level = DetailLevel::Compact;
+    Config full = Config::defaults();
+    full.detail_level = DetailLevel::Full;
+
+    EXPECT_EQ(renderer.to_string(snap, compact), renderer.to_string(snap, full));
+}

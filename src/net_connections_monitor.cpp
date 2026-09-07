@@ -164,6 +164,93 @@ void NetConnectionsMonitor::summarize(const std::vector<NetConnectionStats>& con
     out.total_connections = static_cast<unsigned int>(conns.size());
 }
 
+std::string NetConnectionsMonitor::socket_key(const NetConnectionStats& conn) {
+    return conn.protocol + "|" + conn.local_addr + ":" + std::to_string(conn.local_port) +
+           "|" + conn.remote_addr + ":" + std::to_string(conn.remote_port);
+}
+
+void NetConnectionsMonitor::attribute_bandwidth(const std::vector<NetConnectionStats>& conns,
+                                                std::vector<ProcessStats>& procs) {
+    // Socket counts come straight out of the table and need no history, so
+    // they are filled on every platform that puts a PID on a connection.
+    //
+    // Only a non-zero count is recorded: on Linux the inode-to-PID join fails
+    // for another user's process, which makes "no sockets open" and "could not
+    // be attributed" the same observation — and reporting the first as a
+    // measured zero is exactly what this program does not do.
+    {
+        std::map<int, unsigned int> socket_counts;
+        for (const auto& c : conns) {
+            if (c.pid > 0) ++socket_counts[c.pid];
+        }
+        for (auto& p : procs) {
+            const auto it = socket_counts.find(p.pid);
+            if (it != socket_counts.end()) p.socket_count = it->second;
+        }
+    }
+
+    if (!bandwidth_attribution_supported()) return;
+
+    std::map<std::string, SocketTraffic> current;
+    for (const auto& c : conns) {
+        if (c.pid <= 0) continue;
+        SocketTraffic& t = current[socket_key(c)];
+        // A key can repeat (two sockets with the same 4-tuple in different
+        // states); accumulating keeps both of them counted.
+        t.rx += c.rx_bytes;
+        t.tx += c.tx_bytes;
+        t.pid = c.pid;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!have_previous_traffic_) {
+        // Nothing to difference against yet: leave every rate empty rather
+        // than reporting a socket's lifetime totals as one interval's rate.
+        previous_traffic_      = std::move(current);
+        previous_traffic_time_ = now;
+        have_previous_traffic_ = true;
+        return;
+    }
+
+    const double elapsed =
+        std::chrono::duration<double>(now - previous_traffic_time_).count();
+    if (elapsed <= 0.0) {
+        previous_traffic_      = std::move(current);
+        previous_traffic_time_ = now;
+        return;
+    }
+
+    // Sum per-socket deltas into per-process totals.  A socket that appeared
+    // or disappeared between samples contributes nothing: its counters cover a
+    // period this interval did not observe.
+    struct Delta { uint64_t tx{0}; };
+    std::map<int, Delta> deltas;
+    for (const auto& [key, entry] : current) {
+        const auto prev = previous_traffic_.find(key);
+        if (prev == previous_traffic_.end()) continue;
+        if (prev->second.pid != entry.pid)   continue;   // socket reused by another process
+        if (entry.tx < prev->second.tx)      continue;
+
+        deltas[entry.pid].tx += entry.tx - prev->second.tx;
+    }
+
+    for (auto& p : procs) {
+        const auto it = deltas.find(p.pid);
+        if (it == deltas.end()) continue;
+
+        // Transmit only.  Measured against an exact 10485760-byte loopback
+        // transfer, netstat's txbytes advanced by exactly 10485760 while
+        // rxbytes advanced by 21005632 — a factor of 2.003, reproduced over a
+        // real interface against a rate-limited download (3.0 MB/s measured as
+        // 6.4).  Halving it would be a calibration from one machine and one
+        // macOS release, so the receive direction is reported as unmeasured.
+        p.tx_bytes_per_sec = static_cast<double>(it->second.tx) / elapsed;
+    }
+
+    previous_traffic_      = std::move(current);
+    previous_traffic_time_ = now;
+}
+
 // ---------------------------------------------------------------------------
 // Linux implementation
 // ---------------------------------------------------------------------------

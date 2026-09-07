@@ -3,10 +3,13 @@
 #include "sysmon/utils.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <sstream>
+#include <system_error>
 
 #if defined(SYSMON_POSIX)
 #  include <pwd.h>
@@ -20,6 +23,8 @@
 #if defined(SYSMON_MACOS)
 #  include <sys/sysctl.h>
 #  include <sys/proc_info.h>
+#  include <sys/socket.h>
+#  include <sys/stat.h>
 #  include <libproc.h>
 #  include <mach/mach.h>
 #  include <mach/mach_time.h>
@@ -378,6 +383,13 @@ std::vector<ProcessStats> ProcessMonitor::read_linux(unsigned int limit) {
             if (!fd_ec) ps.open_files = fds;
         }
 
+        if (have_io) {
+            // The cumulative counters answer "how much has this process
+            // written since it started", which the instantaneous rate cannot.
+            ps.io_read_bytes_total  = io_read;
+            ps.io_write_bytes_total = io_write;
+        }
+
         if (it != previous_snapshots_.end() && have_io) {
             const double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
             if (dt > 0.0) {
@@ -449,6 +461,11 @@ std::vector<ProcessStats> ProcessMonitor::read_macos(unsigned int limit) {
 
     const auto now = std::chrono::steady_clock::now();
 
+    /// Scratch space for the per-process descriptor-table fetch, reused across
+    /// the whole list so counting open files costs one allocation, not one per
+    /// process.
+    std::vector<proc_fdinfo> fd_buffer;
+
     for (const auto& kp : procs) {
         const int pid = kp.kp_proc.p_pid;
         if (pid < 0) continue;
@@ -505,6 +522,25 @@ std::vector<ProcessStats> ProcessMonitor::read_macos(unsigned int limit) {
             // comes from whether the task currently has a running thread.
             if (ps.state == "R" && pti.pti_numrunning == 0) ps.state = "S";
 
+            // Open descriptor count.
+            //
+            // The size query is the descriptor *table's* capacity, not how
+            // much of it is in use: for one Firefox process it answered 6560
+            // bytes (820 entries) while the filled call returned 920 bytes
+            // (115 entries).  Only the second number is the count, so the
+            // table has to be fetched, not just measured.  The buffer is
+            // reused across processes to keep that to one allocation.
+            const int fd_capacity = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nullptr, 0);
+            if (fd_capacity > 0) {
+                const size_t needed = static_cast<size_t>(fd_capacity) / sizeof(proc_fdinfo) + 1;
+                if (fd_buffer.size() < needed) fd_buffer.resize(needed);
+                const int fd_used = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fd_buffer.data(),
+                                                 static_cast<int>(fd_buffer.size() * sizeof(proc_fdinfo)));
+                if (fd_used > 0) {
+                    ps.open_files = static_cast<uint64_t>(fd_used) / sizeof(proc_fdinfo);
+                }
+            }
+
             // Per-process disk I/O, when the kernel will report it for us.
             uint64_t io_read = 0, io_write = 0;
             bool have_io = false;
@@ -514,6 +550,10 @@ std::vector<ProcessStats> ProcessMonitor::read_macos(unsigned int limit) {
                 io_read  = rusage.ri_diskio_bytesread;
                 io_write = rusage.ri_diskio_byteswritten;
                 have_io  = true;
+                // Cumulative since the process started, which is the half of
+                // "how much is this program writing" that a rate cannot give.
+                ps.io_read_bytes_total  = io_read;
+                ps.io_write_bytes_total = io_write;
             }
 
             auto it = previous_snapshots_.find(pid);
@@ -662,6 +702,12 @@ std::vector<ProcessStats> ProcessMonitor::read_windows(unsigned int limit) {
 
                 IO_COUNTERS io{};
                 if (GetProcessIoCounters(process, &io)) {
+                    // ReadTransferCount / WriteTransferCount are cumulative
+                    // for the life of the process, so they are the totals as
+                    // well as the source of the rate below.
+                    ps.io_read_bytes_total  = io.ReadTransferCount;
+                    ps.io_write_bytes_total = io.WriteTransferCount;
+
                     const auto it2 = previous_snapshots_.find(ps.pid);
                     if (it2 != previous_snapshots_.end()) {
                         const double dt = std::chrono::duration<double>(now - it2->second.timestamp).count();
@@ -734,3 +780,206 @@ std::string ProcessMonitor::get_username(unsigned int uid) {
     return std::to_string(uid);
 #endif
 }
+
+// ---------------------------------------------------------------------------
+// Open descriptors (on demand, one process at a time)
+// ---------------------------------------------------------------------------
+
+#if defined(SYSMON_LINUX)
+
+OpenFilesResult ProcessMonitor::open_files(int pid) {
+    OpenFilesResult result;
+    const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
+
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) {
+        result.status = OpenFilesStatus::NoSuchProcess;
+        return result;
+    }
+
+    std::filesystem::directory_iterator it(dir, ec);
+    if (ec) {
+        // EACCES is by far the common case here: /proc/<pid>/fd is 0500 and
+        // owned by the process's user.  Report that as its own answer rather
+        // than as "no files open".
+        result.status = (ec == std::errc::permission_denied)
+                      ? OpenFilesStatus::PermissionDenied
+                      : OpenFilesStatus::NoSuchProcess;
+        return result;
+    }
+
+    for (const auto& entry : it) {
+        OpenFile file;
+        const std::string name = entry.path().filename().string();
+        if (const auto fd = utils::to_int(name)) file.fd = static_cast<int>(*fd);
+
+        std::error_code link_ec;
+        const std::filesystem::path target = std::filesystem::read_symlink(entry.path(), link_ec);
+        if (link_ec) continue;
+        file.path = target.string();
+
+        // The kernel spells non-file descriptors as "socket:[12345]" and
+        // friends, which is also how their type is identified.
+        if (utils::starts_with(file.path, "socket:"))      file.type = "socket";
+        else if (utils::starts_with(file.path, "pipe:"))   file.type = "pipe";
+        else if (utils::starts_with(file.path, "anon_inode:")) file.type = "anon";
+        else {
+            std::error_code stat_ec;
+            const auto status = std::filesystem::status(target, stat_ec);
+            if (stat_ec)                                            file.type = "file";
+            else if (std::filesystem::is_directory(status))         file.type = "dir";
+            else if (std::filesystem::is_character_file(status))    file.type = "chr";
+            else if (std::filesystem::is_fifo(status))              file.type = "fifo";
+            else if (std::filesystem::is_socket(status))            file.type = "socket";
+            else                                                     file.type = "file";
+
+            if (file.type == "file") {
+                std::error_code size_ec;
+                const auto size = std::filesystem::file_size(target, size_ec);
+                if (!size_ec) file.size_bytes = static_cast<uint64_t>(size);
+            }
+        }
+
+        // /proc/<pid>/fdinfo/<fd> carries the access mode and the file offset,
+        // which is what says whether a process is reading or writing a path.
+        if (const auto info = utils::read_file("/proc/" + std::to_string(pid) +
+                                               "/fdinfo/" + name)) {
+            std::istringstream iss(*info);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (utils::starts_with(line, "pos:")) {
+                    if (const auto pos = utils::to_int(utils::trim(line.substr(4)))) {
+                        file.position = static_cast<uint64_t>(*pos);
+                    }
+                } else if (utils::starts_with(line, "flags:")) {
+                    // Octal open() flags; the low two bits are the access mode.
+                    const std::string digits = utils::trim(line.substr(6));
+                    const long flags = std::strtol(digits.c_str(), nullptr, 8);
+                    switch (flags & 3) {
+                        case 0: file.mode = "r";  break;
+                        case 1: file.mode = "w";  break;
+                        case 2: file.mode = "rw"; break;
+                        default: break;
+                    }
+                }
+            }
+        }
+
+        result.files.push_back(std::move(file));
+    }
+
+    std::sort(result.files.begin(), result.files.end(),
+              [](const OpenFile& a, const OpenFile& b) { return a.fd < b.fd; });
+    result.status = OpenFilesStatus::Ok;
+    return result;
+}
+
+#elif defined(SYSMON_MACOS)
+
+OpenFilesResult ProcessMonitor::open_files(int pid) {
+    OpenFilesResult result;
+
+    const int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nullptr, 0);
+    if (size <= 0) {
+        // proc_pidinfo() sets EPERM for a process owned by another user.
+        result.status = (errno == EPERM || errno == EACCES)
+                      ? OpenFilesStatus::PermissionDenied
+                      : OpenFilesStatus::NoSuchProcess;
+        return result;
+    }
+
+    std::vector<proc_fdinfo> fds(static_cast<size_t>(size) / sizeof(proc_fdinfo) + 1);
+    const int used = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds.data(),
+                                  static_cast<int>(fds.size() * sizeof(proc_fdinfo)));
+    if (used <= 0) {
+        result.status = (errno == EPERM || errno == EACCES)
+                      ? OpenFilesStatus::PermissionDenied
+                      : OpenFilesStatus::NoSuchProcess;
+        return result;
+    }
+
+    const size_t count = static_cast<size_t>(used) / sizeof(proc_fdinfo);
+    for (size_t i = 0; i < count && i < fds.size(); ++i) {
+        OpenFile file;
+        file.fd = fds[i].proc_fd;
+
+        switch (fds[i].proc_fdtype) {
+            case PROX_FDTYPE_VNODE: {
+                file.type = "file";
+                vnode_fdinfowithpath info{};
+                const int n = proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDVNODEPATHINFO,
+                                             &info, sizeof(info));
+                if (n == static_cast<int>(sizeof(info))) {
+                    file.path = info.pvip.vip_path;
+                    if (info.pvip.vip_vi.vi_stat.vst_size > 0) {
+                        file.size_bytes = static_cast<uint64_t>(info.pvip.vip_vi.vi_stat.vst_size);
+                    }
+                    if (S_ISDIR(info.pvip.vip_vi.vi_stat.vst_mode)) file.type = "dir";
+                    else if (S_ISCHR(info.pvip.vip_vi.vi_stat.vst_mode)) file.type = "chr";
+                    if (info.pfi.fi_offset > 0) {
+                        file.position = static_cast<uint64_t>(info.pfi.fi_offset);
+                    }
+                    switch (info.pfi.fi_openflags & 3) {
+                        case 1: file.mode = "r";  break;
+                        case 2: file.mode = "w";  break;
+                        case 3: file.mode = "rw"; break;
+                        default: break;
+                    }
+                }
+                break;
+            }
+            case PROX_FDTYPE_SOCKET: {
+                file.type = "socket";
+                socket_fdinfo info{};
+                const int n = proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO,
+                                             &info, sizeof(info));
+                if (n == static_cast<int>(sizeof(info))) {
+                    switch (info.psi.soi_family) {
+                        case AF_INET:  file.path = "inet socket";  break;
+                        case AF_INET6: file.path = "inet6 socket"; break;
+                        case AF_UNIX:  file.path = "unix socket";  break;
+                        default:       file.path = "socket";       break;
+                    }
+                } else {
+                    file.path = "socket";
+                }
+                break;
+            }
+            case PROX_FDTYPE_PIPE:      file.type = "pipe";  file.path = "pipe";  break;
+            case PROX_FDTYPE_KQUEUE:    file.type = "kqueue"; file.path = "kqueue"; break;
+            case PROX_FDTYPE_ATALK:     file.type = "atalk";  file.path = "atalk";  break;
+            default:                    file.type = "other";  file.path = "";       break;
+        }
+
+        result.files.push_back(std::move(file));
+    }
+
+    std::sort(result.files.begin(), result.files.end(),
+              [](const OpenFile& a, const OpenFile& b) { return a.fd < b.fd; });
+    result.status = OpenFilesStatus::Ok;
+    return result;
+}
+
+#elif defined(SYSMON_WINDOWS)
+
+OpenFilesResult ProcessMonitor::open_files(int) {
+    // Enumerating another process's handles needs
+    // NtQuerySystemInformation(SystemHandleInformation) plus a
+    // NtQueryObject() call per handle, and the latter can block indefinitely
+    // on a pipe handle with no reader — a documented hang that costs a
+    // watchdog thread to work around.  Reporting "unsupported" is the honest
+    // answer until that is worth building.
+    OpenFilesResult result;
+    result.status = OpenFilesStatus::Unsupported;
+    return result;
+}
+
+#else
+
+OpenFilesResult ProcessMonitor::open_files(int) {
+    OpenFilesResult result;
+    result.status = OpenFilesStatus::Unsupported;
+    return result;
+}
+
+#endif

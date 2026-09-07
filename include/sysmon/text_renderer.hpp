@@ -28,7 +28,16 @@ public:
     void render_to(std::ostream& out, const Snapshot& snap, const Config& cfg);
 
 private:
-    void render_system(std::ostream& out, const SystemStats& stats);
+    /**
+     * @brief One block of headline numbers, for DetailLevel::Compact.
+     *
+     * `--compact` used to be accepted and then ignored entirely in text mode,
+     * so the flag looked as though it had worked while the output was
+     * identical.
+     */
+    void render_summary(std::ostream& out, const Snapshot& snap, const Config& cfg);
+
+    void render_system(std::ostream& out, const SystemStats& stats, const Config& cfg);
     void render_cpu(std::ostream& out, const CpuStats& stats, const Config& cfg);
     void render_gpu(std::ostream& out, const std::vector<GpuStats>& gpus, const Config& cfg);
     void render_memory(std::ostream& out, const MemoryStats& stats, const Config& cfg);

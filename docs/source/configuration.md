@@ -20,6 +20,15 @@ sysmon --generate-config
 | `display` | `show_network_details` | Per-interface MAC, MTU, totals and errors |
 | `display` | `show_network_inactive` | Include interfaces that carry no traffic |
 | `display` | `proc_sort` | Process order: `cpu`, `mem`, `pid`, `name`, `time` |
+| `display` | `detail_level` | Density: `compact`, `normal`, `detailed`, `full` |
+| `display` | `start_view` | View the dashboard opens in: `overview`, `cpu`, `memory`, `gpu`, `disk`, `network`, `connections`, `processes`, `sensors` |
+
+`detail_level` replaces the older `compact_mode` boolean. A config file written
+by an earlier sysmon carries only `compact_mode`, and that is still read and
+mapped onto `detail_level = compact`; if a file somehow has both, the newer key
+wins. Only `detail_level` is written out.
+
+`proc_limit` and `connections_limit` accept `0`, meaning "no limit".
  & Customization
 
 `sysmon` allows you to customize every aspect of the monitoring dashboard. You can configure what components are shown, set thresholds, filter network interfaces or file systems, and toggle between detailed deep monitoring or a compact average summary dashboard.
@@ -57,7 +66,13 @@ defaults. Use `--generate-config` to write an editable file.
 [display]
 refresh_interval = 2
 tui_enabled = true
-compact_mode = false
+
+# How much of each section to show: compact, normal, detailed, full
+detail_level = normal
+
+# View the dashboard opens in: overview, cpu, memory, gpu, disk,
+# network, connections, processes, sensors
+start_view = overview
 
 # CPU Options
 show_cpu = true
@@ -124,6 +139,16 @@ While running the live TUI dashboard, you can toggle components and modes instan
 
 | Key | Function |
 |---|---|
+| `0`–`8` | Switch to the overview, CPU, memory, GPU, disk, network, connections, process or sensor view |
+| `Tab` | Next view |
+| `Esc` | Back to the overview; quits from the overview |
+| `+` / `-` | More / less detail |
+| `m` | Toggle compact density |
+| `↑` `↓` / `k` `j` | Move the cursor in a list |
+| `PgUp` / `PgDn` | Page through a list |
+| `Home` / `End` | Jump to the start / end of a list |
+| `Enter` | Inspect the selected process |
+| `a` | Show all — lift the process and connection limits |
 | `c` | Toggle individual CPU core bars |
 | `g` | Toggle GPU / Graphics stats |
 | `n` | Toggle Network interface bandwidth & sparklines |
@@ -131,10 +156,15 @@ While running the live TUI dashboard, you can toggle components and modes instan
 | `p` | Toggle Process list table |
 | `t` | Toggle Temperatures & hardware sensors |
 | `d` | Toggle Storage & Disk I/O read/write rates |
-| `m` | Toggle **Compact Mode** (switches between full deep view and summary dashboard) |
+| `b` | Toggle Battery & Power |
+| `o` | Cycle the process sort order |
 | `s` | **Save** current interactive view settings to `~/.config/sysmon/sysmon.conf` |
 | `r` | Force immediate refresh |
-| `q` / `ESC` | Quit sysmon |
+| `q` / `Ctrl+C` | Quit sysmon |
+
+The scroll position and the selected process are deliberately *not* saved by
+`s`: they are where you happen to be looking, not settings. `detail_level` and
+`start_view` are saved.
 
 ---
 
@@ -145,9 +175,12 @@ You can also override any configuration setting using CLI flags:
 ### Display & Modes
 - `sysmon --once` : Output snapshot once to stdout and exit (ideal for scripts and cron)
 - `sysmon --no-tui` : Stream plain text updates without ANSI escape codes
-- `sysmon --compact` or `sysmon -m` : Start in compact summary mode
+- `sysmon --compact` or `sysmon -m` : Shorthand for `--detail compact`
+- `sysmon --detail LEVEL` : Density — `compact`, `normal`, `detailed` or `full`
+- `sysmon --view NAME` : Open directly on one subsystem
 - `sysmon --interval N` or `sysmon -i N` : Set update frequency in seconds (e.g. `-i 1`)
-- `sysmon --limit N` : Set max number of processes to display
+- `sysmon --limit N` : Set max number of processes to display (`0` = all)
+- `sysmon --all` : Show every process and connection, with no limits
 
 ### Component Toggles
 - `--cores` / `--no-cores` : Enable / disable per-core CPU breakdown
@@ -157,6 +190,8 @@ You can also override any configuration setting using CLI flags:
 - `--net` / `--no-net` : Enable / disable network interfaces
 - `--temp` / `--no-temp` : Enable / disable temperatures
 - `--disk` / `--no-disk` : Enable / disable storage and disk I/O
+- `--battery` / `--no-battery` : Enable / disable battery and power
+- `--listen` : Include listening sockets in the connections table
 
 ### Configuration File Options
 - `--config /path/to/file.conf` : Load custom configuration file

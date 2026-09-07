@@ -6,8 +6,11 @@
 #ifndef SYSMON_UTILS_HPP
 #define SYSMON_UTILS_HPP
 
+#include <iomanip>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <type_traits>
 #include <string_view>
 #include <vector>
 #include <cstdint>
@@ -111,6 +114,38 @@ std::string format_time(long long epoch_seconds);
 
 /** @brief Format a percentage with one decimal, or "N/A" when unset. */
 std::string format_percent(const std::optional<double>& value);
+
+/**
+ * @brief Render an optional measurement, or "N/A" when it was not measurable.
+ *
+ * The one place every renderer expresses the optionality contract, so a metric
+ * the platform cannot read never reaches the screen as a plausible-looking
+ * zero.
+ */
+template <typename T>
+std::string format_opt(const std::optional<T>& value,
+                       const std::string& suffix = "",
+                       int precision = 1) {
+    if (!value.has_value()) return "N/A";
+    std::ostringstream oss;
+    if constexpr (std::is_floating_point_v<T>) {
+        oss << std::fixed << std::setprecision(precision) << value.value();
+    } else {
+        oss << value.value();
+    }
+    if (!suffix.empty()) oss << " " << suffix;
+    return oss.str();
+}
+
+/** @brief format_opt() for a byte count: "1.2 GB", or "N/A". */
+inline std::string format_opt_bytes(const std::optional<uint64_t>& value) {
+    return value.has_value() ? format_bytes(value.value()) : "N/A";
+}
+
+/** @brief format_opt() for a throughput: "1.2 MB/s", or "N/A". */
+inline std::string format_opt_rate(const std::optional<double>& value) {
+    return value.has_value() ? format_bytes_per_sec(value.value()) : "N/A";
+}
 
 /** @brief Escape a string for inclusion in a JSON document (without quotes). */
 std::string json_escape(std::string_view str);

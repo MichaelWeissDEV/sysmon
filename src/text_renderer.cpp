@@ -49,7 +49,12 @@ void TextRenderer::render(const Snapshot& snap, const Config& cfg) {
 }
 
 void TextRenderer::render_to(std::ostream& out, const Snapshot& snap, const Config& cfg) {
-    render_system(out, snap.system);
+    if (cfg.compact_mode()) {
+        render_summary(out, snap, cfg);
+        return;
+    }
+
+    render_system(out, snap.system, cfg);
     out << "\n";
 
     if (cfg.show_cpu) {
@@ -96,7 +101,64 @@ void TextRenderer::render_to(std::ostream& out, const Snapshot& snap, const Conf
 // System
 // ---------------------------------------------------------------------------
 
-void TextRenderer::render_system(std::ostream& out, const SystemStats& s) {
+void TextRenderer::render_summary(std::ostream& out, const Snapshot& snap, const Config& cfg) {
+    const auto& sys = snap.system;
+    const auto& cpu = snap.cpu;
+    const auto& mem = snap.memory;
+
+    out << sys.hostname << "  " << sys.os << " (" << sys.architecture << ")"
+        << "  up " << sys.uptime << "\n";
+
+    out << label("CPU") << percent(cpu.usage_percent)
+        << "  " << cpu.logical_cores << " cores"
+        << "  load " << number(snap.load.load_1min, 2)
+        << " " << number(snap.load.load_5min, 2)
+        << " " << number(snap.load.load_15min, 2);
+    if (cpu.temperature_celsius.has_value()) {
+        out << "  " << opt(cpu.temperature_celsius, "°C");
+    }
+    out << "\n";
+
+    out << label("RAM") << utils::format_bytes(mem.ram_used_bytes) << " / "
+        << utils::format_bytes(mem.ram_total_bytes)
+        << "  (" << percent(mem.ram_usage_percent) << ")";
+    if (mem.swap_total_bytes > 0) {
+        out << "  swap " << utils::format_bytes(mem.swap_used_bytes) << " / "
+            << utils::format_bytes(mem.swap_total_bytes);
+    }
+    out << "\n";
+
+    if (cfg.show_disk && !snap.disks.empty()) {
+        const DiskStats& root = snap.disks.front();
+        out << label("Disk") << root.mountpoint << "  "
+            << utils::format_bytes(root.used_bytes) << " / "
+            << utils::format_bytes(root.total_bytes)
+            << "  (" << percent(root.usage_percent) << ")\n";
+    }
+
+    if (cfg.show_network) {
+        double rx = 0, tx = 0;
+        for (const auto& n : snap.network) {
+            if (n.is_loopback) continue;
+            rx += n.rx_bytes_per_sec;
+            tx += n.tx_bytes_per_sec;
+        }
+        out << label("Network") << "rx " << utils::format_bytes_per_sec(rx)
+            << "  tx " << utils::format_bytes_per_sec(tx)
+            << "  " << snap.net_global.tcp_established << " established\n";
+    }
+
+    if (cfg.show_battery && snap.battery.present) {
+        out << label("Battery") << opt(snap.battery.percent, "%")
+            << "  " << snap.battery.state << "\n";
+    }
+
+    out << label("Processes") << snap.load.total_processes << " total, "
+        << snap.load.running_processes << " running, "
+        << snap.load.total_threads << " threads\n";
+}
+
+void TextRenderer::render_system(std::ostream& out, const SystemStats& s, const Config& cfg) {
     out << "System\n";
     out << label("Hostname")     << s.hostname << "\n";
     out << label("OS")           << s.os;
@@ -122,6 +184,9 @@ void TextRenderer::render_system(std::ostream& out, const SystemStats& s) {
         out << label("Processes") << s.process_count.value();
         if (s.thread_count.has_value()) out << " (" << s.thread_count.value() << " threads)";
         out << "\n";
+    }
+    if (cfg.at_least(DetailLevel::Detailed) && s.page_size_bytes.has_value()) {
+        out << label("Page size") << utils::format_bytes(s.page_size_bytes.value()) << "\n";
     }
 }
 
@@ -575,15 +640,19 @@ void TextRenderer::render_connections(std::ostream& out,
                                       const std::vector<NetConnectionStats>& conns,
                                       const Config& cfg) {
     if (conns.empty()) return;
-    const size_t shown_total = std::min(static_cast<size_t>(cfg.connections_limit), conns.size());
-    out << "Active Network Connections (top " << shown_total << ")\n";
+    const bool   unlimited   = cfg.connections_limit <= 0;
+    const size_t shown_total = unlimited
+                             ? conns.size()
+                             : std::min(static_cast<size_t>(cfg.connections_limit), conns.size());
+    out << "Active Network Connections ("
+        << (unlimited ? "all " : "top ") << shown_total << ")\n";
     out << "  " << utils::fit("PROTO", 7) << utils::fit("LOCAL", 24)
         << utils::fit("REMOTE", 24) << utils::fit("STATE", 14)
         << utils::fit_right("PID", 8) << "  PROCESS\n";
 
-    int shown = 0;
+    size_t shown = 0;
     for (const auto& c : conns) {
-        if (++shown > cfg.connections_limit) break;
+        if (++shown > shown_total) break;
 
         const std::string local = c.local_addr + ":" + std::to_string(c.local_port);
         const std::string remote = (c.remote_port == 0)
@@ -606,18 +675,36 @@ void TextRenderer::render_connections(std::ostream& out,
 void TextRenderer::render_processes(std::ostream& out, const std::vector<ProcessStats>& procs,
                                     const Config& cfg) {
     if (procs.empty()) return;
-    const size_t shown_total = std::min(static_cast<size_t>(cfg.proc_limit), procs.size());
-    out << "Processes (top " << shown_total << ")\n";
+
+    // A limit of 0 means "no limit" everywhere else in sysmon; here it used to
+    // mean "print nothing", so --limit 0 and --all produced an empty table.
+    const bool   unlimited   = cfg.proc_limit <= 0;
+    const size_t shown_total = unlimited
+                             ? procs.size()
+                             : std::min(static_cast<size_t>(cfg.proc_limit), procs.size());
+
+    out << "Processes (" << (unlimited ? "all " : "top ") << shown_total << ")\n";
+
+    // The extra columns exist in every snapshot; they are printed only at the
+    // higher detail levels because they make the table too wide to skim.
+    const bool wide = cfg.at_least(DetailLevel::Detailed);
 
     out << "  " << utils::fit_right("PID", 7) << "  " << utils::fit("COMMAND", 22)
         << utils::fit("USER", 14)
         << utils::fit_right("CPU%", 8) << utils::fit_right("MEM%", 8)
         << utils::fit_right("RSS", 11) << utils::fit_right("VIRT", 11)
-        << utils::fit_right("THR", 5) << utils::fit_right("TIME", 10) << "  S\n";
+        << utils::fit_right("THR", 5) << utils::fit_right("TIME", 10);
+    if (wide) {
+        out << utils::fit_right("PPID", 8) << utils::fit_right("NICE", 6)
+            << utils::fit_right("FDS", 7)
+            << utils::fit_right("DISK R", 11) << utils::fit_right("DISK W", 11)
+            << utils::fit_right("NET TX", 11) << utils::fit_right("SOCK", 6);
+    }
+    out << "  S\n";
 
-    int shown = 0;
+    size_t shown = 0;
     for (const auto& p : procs) {
-        if (++shown > cfg.proc_limit) break;
+        if (++shown > shown_total) break;
         out << "  " << utils::fit_right(std::to_string(p.pid), 7) << "  "
             << utils::column(p.name, 22)
             << utils::column(p.user, 14)
@@ -626,7 +713,29 @@ void TextRenderer::render_processes(std::ostream& out, const std::vector<Process
             << utils::fit_right(utils::format_bytes(p.mem_rss_bytes), 11)
             << utils::fit_right(utils::format_bytes(p.mem_vms_bytes), 11)
             << utils::fit_right(std::to_string(p.threads), 5)
-            << utils::fit_right(utils::format_duration_seconds(p.cpu_time_seconds), 10)
-            << "  " << p.state << "\n";
+            << utils::fit_right(utils::format_duration_seconds(p.cpu_time_seconds), 10);
+        if (wide) {
+            out << utils::fit_right(std::to_string(p.ppid), 8)
+                << utils::fit_right(opt(p.nice), 6)
+                << utils::fit_right(opt(p.open_files), 7)
+                << utils::fit_right(utils::format_opt_rate(p.io_read_bytes_per_sec), 11)
+                << utils::fit_right(utils::format_opt_rate(p.io_write_bytes_per_sec), 11)
+                << utils::fit_right(utils::format_opt_rate(p.tx_bytes_per_sec), 11)
+                << utils::fit_right(opt(p.socket_count), 6);
+        }
+        out << "  " << p.state << "\n";
+    }
+
+    // The full command line answers "which of these six 'python' processes",
+    // which the truncated name column cannot.
+    if (cfg.at_least(DetailLevel::Full)) {
+        out << "\n  Command lines\n";
+        shown = 0;
+        for (const auto& p : procs) {
+            if (++shown > shown_total) break;
+            if (p.cmdline.empty()) continue;
+            out << "  " << utils::fit_right(std::to_string(p.pid), 7) << "  "
+                << p.cmdline << "\n";
+        }
     }
 }

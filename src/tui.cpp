@@ -1,4 +1,5 @@
 #include "sysmon/tui.hpp"
+#include "sysmon/net_connections_monitor.hpp"
 #include "sysmon/utils.hpp"
 #include "sysmon/version.hpp"
 
@@ -157,9 +158,14 @@ std::string TUI::sparkline(const std::deque<double>& history, int width) const {
 }
 
 std::string TUI::section_header(const std::string& title, int width) const {
+    // "── " + title + " " is 4 columns of frame, so the title itself gets
+    // whatever is left.  Truncating here rather than at every call site is
+    // what keeps a long, generated heading from wrapping the whole frame.
+    const std::string shown = utils::truncate(title, static_cast<size_t>(std::max(1, width - 4)));
+
     std::string line = c_border() + "──" + reset_color() + " "
-                     + c_title() + title + reset_color() + " ";
-    const int visible_len = 4 + static_cast<int>(utils::display_width(title));
+                     + c_title() + shown + reset_color() + " ";
+    const int visible_len = 4 + static_cast<int>(utils::display_width(shown));
     int remaining   = width - visible_len;
     if (remaining > 0) {
         line += c_border();
@@ -197,37 +203,50 @@ void TUI::render_header(std::ostringstream& out, const SystemStats& sys, int wid
         return static_cast<int>(utils::display_width(text));
     };
 
-    // Right half, in decreasing order of importance: clock, hostname, uptime.
-    std::string right_plain = clock;
-    std::string right       = c_accent() + clock + reset_color() + " ";
-    const int budget = width - width_of(brand) - 2;
+    // The left half is fixed cost; everything on the right is optional and is
+    // added only while it still fits.  Budgeting in that order is what keeps
+    // the bar inside the terminal on a narrow window — the previous version
+    // computed a budget for the OS string but then appended the compact tag
+    // and the right half regardless, and a 60-column terminal wrapped.
+    const std::string compact_tag = compact ? "  [COMPACT]" : "";
 
-    if (width_of(right_plain) + width_of(sys.hostname) + 2 < budget) {
-        right_plain = sys.hostname + "  " + right_plain;
-        right = c_dim() + sys.hostname + reset_color() + "  " +
-                c_accent() + clock + reset_color() + " ";
-        if (width_of(right_plain) + width_of(uptime) + 2 < budget) {
-            right_plain = sys.hostname + "  " + uptime + "  " + clock;
-            right = c_dim() + sys.hostname + "  " + uptime + reset_color() + "  " +
+    std::string left_plain = " " + brand + compact_tag;
+    std::string left       = " " + bold() + color_fg(100, 200, 255) + brand + reset_color();
+    if (compact) left += "  " + c_warn() + "[COMPACT]" + reset_color();
+
+    // Right half, in decreasing order of importance: clock, hostname, uptime.
+    // A candidate is accepted only if the whole row still fits afterwards.
+    std::string right_plain;
+    std::string right;
+    const auto fits = [&](const std::string& candidate) {
+        return width_of(left_plain) + width_of(candidate) + 2 <= width;
+    };
+
+    if (fits(clock)) {
+        right_plain = clock;
+        right       = c_accent() + clock + reset_color() + " ";
+
+        const std::string with_host = sys.hostname + "  " + clock;
+        if (!sys.hostname.empty() && fits(with_host)) {
+            right_plain = with_host;
+            right = c_dim() + sys.hostname + reset_color() + "  " +
                     c_accent() + clock + reset_color() + " ";
+
+            const std::string with_uptime = sys.hostname + "  " + uptime + "  " + clock;
+            if (fits(with_uptime)) {
+                right_plain = with_uptime;
+                right = c_dim() + sys.hostname + "  " + uptime + reset_color() + "  " +
+                        c_accent() + clock + reset_color() + " ";
+            }
         }
     }
 
-    // Left half: brand always, then the OS string in whatever room is left.
-    std::string left_plain = " " + brand;
-    std::string left = " " + bold() + color_fg(100, 200, 255) + brand + reset_color();
-
-    const std::string compact_tag = compact ? "  [COMPACT]" : "";
-    const int room = width - width_of(left_plain) - width_of(right_plain)
-                   - width_of(compact_tag) - 3;
+    // The OS string takes whatever the two halves left behind.
+    const int room = width - width_of(left_plain) - width_of(right_plain) - 3;
     if (room > 8) {
         const std::string shown = utils::truncate(os_part, static_cast<size_t>(room));
         left_plain += "  " + shown;
-        left += "  " + c_dim() + shown + reset_color();
-    }
-    if (compact) {
-        left_plain += compact_tag;
-        left += "  " + c_warn() + "[COMPACT]" + reset_color();
+        left       += "  " + c_dim() + shown + reset_color();
     }
 
     const int padding = std::max(0, width - width_of(left_plain) - width_of(right_plain) - 1);
@@ -269,7 +288,7 @@ void TUI::render_cpu_section(std::ostringstream& out, const CpuStats& cpu, int w
         << std::fixed << std::setprecision(1) << std::setw(5) << cpu.usage_percent << "%" << reset_color()
         << "  " << cpu_bar << "  " << spark << "\033[K\n";
 
-    if (cfg.show_cpu_cores_detail && !cfg.compact_mode) {
+    if (cfg.show_cpu_cores_detail && !cfg.compact_mode()) {
         out << c_label() << " Breakdown " << reset_color()
             << c_good() << "usr " << std::fixed << std::setprecision(1) << cpu.user_percent << "%" << reset_color()
             << c_dim() << " | " << reset_color()
@@ -286,7 +305,7 @@ void TUI::render_cpu_section(std::ostringstream& out, const CpuStats& cpu, int w
     }
 
     // Per-core bars
-    if (cfg.show_cpu_per_core && !cpu.per_core.empty() && !cfg.compact_mode) {
+    if (cfg.show_cpu_per_core && !cpu.per_core.empty() && !cfg.compact_mode()) {
         out << "\n" << c_dim() << " Individual Cores:" << reset_color() << "\033[K\n";
         int cores_per_row = std::max(1, width / 20);
         int col_cnt = 0;
@@ -567,7 +586,7 @@ void TUI::render_network_section(std::ostringstream& out, const std::vector<Netw
 }
 
 void TUI::render_connections_section(std::ostringstream& out, const std::vector<NetConnectionStats>& conns, int width, const Config& cfg) {
-    if (!cfg.show_connections || conns.empty() || cfg.compact_mode) return;
+    if (!cfg.show_connections || conns.empty() || cfg.compact_mode()) return;
 
     out << section_header("Active Network Connections", width) << "\033[K\n";
 
@@ -586,9 +605,11 @@ void TUI::render_connections_section(std::ostringstream& out, const std::vector<
     out << utils::fit_right("PID", 7) << "  "
         << "PROCESS" << reset_color() << "\033[K\n";
 
-    int shown = 0;
+    const size_t conn_limit = cfg.connections_limit > 0
+                            ? static_cast<size_t>(cfg.connections_limit) : conns.size();
+    size_t shown = 0;
     for (const auto& c : conns) {
-        if (++shown > cfg.connections_limit) break;
+        if (++shown > conn_limit) break;
 
         std::string laddr = c.local_addr + ":" + std::to_string(c.local_port);
         std::string raddr = c.remote_addr + ":" + std::to_string(c.remote_port);
@@ -641,37 +662,54 @@ void TUI::render_disk_section(std::ostringstream& out, const std::vector<DiskSta
 
     out << section_header("Storage & Disk I/O", width) << "\033[K\n";
 
-    // 1 + name + fs(7) + 9 used + " / " + 9 total + 1 + bar + 1 + 6 percent.
+    // Every field has a reserved width, and the bar takes exactly what is
+    // left.  std::setw() only pads, so a value wider than its field used to
+    // push the row past the right edge of a narrow terminal.
+    const int fs_w   = (width >= 68) ? 7 : 0;
     const int name_w = (width < 76) ? 14 : 22;
-    const int bar_w  = std::max(6, width - 40 - name_w);
+    const int fixed  = 1 + name_w + fs_w + 1 + 9 + 3 + 9 + 1 + 1 + 6;
+    const int bar_w  = std::max(4, width - fixed);
+
     for (const auto& d : disks) {
         if (d.total_bytes == 0) continue;
         if (cfg.excluded_filesystems.count(d.filesystem_type)) continue;
 
         out << " " << c_accent() << utils::column(d.mountpoint, static_cast<size_t>(name_w))
-            << reset_color()
-            << c_dim() << utils::column(d.filesystem_type, 7) << reset_color()
-            << " " << usage_color(d.usage_percent)
-            << std::setw(9) << format_bytes(d.used_bytes) << " / " << format_bytes(d.total_bytes) << reset_color()
+            << reset_color();
+        if (fs_w > 0) {
+            out << c_dim() << utils::column(d.filesystem_type, static_cast<size_t>(fs_w))
+                << reset_color();
+        }
+        out << " " << usage_color(d.usage_percent)
+            << utils::fit_right(format_bytes(d.used_bytes), 9) << " / "
+            << utils::fit_right(format_bytes(d.total_bytes), 9) << reset_color()
             << " " << progress_bar(d.usage_percent, bar_w) << " "
             << usage_color(d.usage_percent)
-            << std::fixed << std::setprecision(1) << std::setw(5) << d.usage_percent << "%" << reset_color() << "\033[K\n";
+            << utils::fit_right(
+                   utils::format_opt(std::optional<double>(d.usage_percent), "%", 1), 6)
+            << reset_color() << "\033[K\n";
     }
 
     if (cfg.show_disk_io && !io.empty()) {
         out << "\n" << c_dim() << " Disk Throughput (Read / Write):" << reset_color() << "\033[K\n";
+        // 2 margin + device + "read: " + rate + 2 + "write: " + rate.
+        const int rate_w = 10;
+        const int dev_w  = std::max(6, std::min(16, width - (2 + 6 + rate_w + 2 + 7 + rate_w)));
         for (const auto& d : io) {
-            out << "  " << c_accent() << utils::column(d.device, 16) << reset_color()
-                << c_good() << "read: " << reset_color() << c_value() << std::setw(10) << format_bytes_per_sec(d.read_bytes_per_sec) << reset_color()
+            out << "  " << c_accent() << utils::column(d.device, static_cast<size_t>(dev_w)) << reset_color()
+                << c_good() << "read: " << reset_color()
+                << c_value() << utils::fit_right(format_bytes_per_sec(d.read_bytes_per_sec), rate_w) << reset_color()
                 << "  "
-                << c_warn() << "write: " << reset_color() << c_value() << std::setw(10) << format_bytes_per_sec(d.write_bytes_per_sec) << reset_color() << "\033[K\n";
+                << c_warn() << "write: " << reset_color()
+                << c_value() << utils::fit_right(format_bytes_per_sec(d.write_bytes_per_sec), rate_w) << reset_color()
+                << "\033[K\n";
         }
     }
     out << "\033[K\n";
 }
 
 void TUI::render_process_section(std::ostringstream& out, const std::vector<ProcessStats>& procs, int width, const Config& cfg) {
-    if (!cfg.show_processes || procs.empty() || cfg.compact_mode) return;
+    if (!cfg.show_processes || procs.empty() || cfg.compact_mode()) return;
 
     out << section_header("Top Processes", width) << "\033[K\n";
 
@@ -691,9 +729,11 @@ void TUI::render_process_section(std::ostringstream& out, const std::vector<Proc
         << std::setw(6) << "THR"
         << "  S" << reset_color() << "\033[K\n";
 
-    int shown = 0;
+    const size_t proc_limit = cfg.proc_limit > 0
+                            ? static_cast<size_t>(cfg.proc_limit) : procs.size();
+    size_t shown = 0;
     for (const auto& p : procs) {
-        if (++shown > cfg.proc_limit) break;
+        if (++shown > proc_limit) break;
 
         std::string cpu_col = usage_color(p.cpu_percent);
         std::string mem_col = usage_color(p.mem_percent);
@@ -750,6 +790,62 @@ void TUI::render_footer(std::ostringstream& out, int width, const Config& cfg) {
 // ---------------------------------------------------------------------------
 
 void TUI::render(const Snapshot& snap, const Config& cfg) {
+    ViewState scratch;
+    render(snap, cfg, scratch);
+}
+
+void TUI::render(const Snapshot& snap, const Config& cfg, ViewState& view) {
+    update_terminal_size();
+    const int W = term_width_;
+    const int H = term_height_;
+
+    // Sparkline histories advance once per frame regardless of the view, so
+    // switching to the CPU view and back does not leave a gap in the graph.
+    push_history(cpu_history_, snap.cpu.usage_percent);
+    push_history(mem_history_, snap.memory.ram_usage_percent);
+    if (!snap.gpus.empty() && snap.gpus[0].usage_percent.has_value()) {
+        push_history(gpu_history_, snap.gpus[0].usage_percent.value());
+    }
+    if (snap.cpu.temperature_celsius.has_value()) {
+        push_history(cpu_temp_history_, snap.cpu.temperature_celsius.value());
+    }
+    double total_rx = 0, total_tx = 0;
+    for (const auto& n : snap.network) {
+        if (!n.is_loopback) {
+            total_rx += n.rx_bytes_per_sec;
+            total_tx += n.tx_bytes_per_sec;
+        }
+    }
+    push_history(net_rx_history_, total_rx / 1024.0);
+    push_history(net_tx_history_, total_tx / 1024.0);
+
+    std::ostringstream out;
+    out << "\033[H";
+
+    if (view.view != View::Overview) {
+        render_view_bar(out, view, cfg, W);
+    }
+
+    switch (view.view) {
+        case View::Cpu:         render_cpu_view(out, snap, cfg, view, W, H);            break;
+        case View::Memory:      render_memory_view(out, snap, cfg, W);                  break;
+        case View::Gpu:         render_gpu_view(out, snap, cfg, W);                     break;
+        case View::Disk:        render_disk_view(out, snap, cfg, view, W, H);           break;
+        case View::Network:     render_network_view(out, snap, cfg, view, W, H);        break;
+        case View::Connections: render_connections_view(out, snap, cfg, view, W, H);    break;
+        case View::Processes:   render_processes_view(out, snap, cfg, view, W, H);      break;
+        case View::Sensors:     render_sensors_view(out, snap, cfg, view, W, H);        break;
+        case View::Process:     render_process_detail_view(out, snap, cfg, view, W, H); break;
+        case View::Overview:
+        default:                render_overview(out, snap, cfg, W);                     break;
+    }
+
+    render_footer(out, W, cfg);
+    out << "\033[J";
+    std::cout << out.str() << std::flush;
+}
+
+void TUI::render_overview(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width) {
     const SystemStats&                     system  = snap.system;
     const CpuStats&                        cpu     = snap.cpu;
     const MemoryStats&                     memory  = snap.memory;
@@ -762,33 +858,9 @@ void TUI::render(const Snapshot& snap, const Config& cfg) {
     const std::vector<ProcessStats>&       procs   = snap.processes;
     const TemperatureStats&                temps   = snap.temperatures;
 
-    update_terminal_size();
-    int W = term_width_;
+    const int W = width;
 
-    // Update sparkline histories
-    push_history(cpu_history_,  cpu.usage_percent);
-    push_history(mem_history_,  memory.ram_usage_percent);
-    if (!gpus.empty() && gpus[0].usage_percent.has_value()) {
-        push_history(gpu_history_, gpus[0].usage_percent.value());
-    }
-    if (cpu.temperature_celsius.has_value()) {
-        push_history(cpu_temp_history_, cpu.temperature_celsius.value());
-    }
-    double total_rx = 0, total_tx = 0;
-    for (const auto& n : net) {
-        if (n.name != "lo" && n.name != "lo0") {
-            total_rx += n.rx_bytes_per_sec;
-            total_tx += n.tx_bytes_per_sec;
-        }
-    }
-    push_history(net_rx_history_, total_rx / 1024.0);
-    push_history(net_tx_history_, total_tx / 1024.0);
-
-    // Build the frame buffer
-    std::ostringstream out;
-    out << "\033[H"; // Cursor home
-
-    render_header(out, system, W, cfg.compact_mode);
+    render_header(out, system, W, cfg.compact_mode());
 
     if (cfg.show_cpu) {
         render_cpu_section(out, cpu, W, cfg);
@@ -827,12 +899,1085 @@ void TUI::render(const Snapshot& snap, const Config& cfg) {
     if (cfg.show_processes) {
         render_process_section(out, procs, W, cfg);
     }
+}
 
-    render_footer(out, W, cfg);
+// ---------------------------------------------------------------------------
+// Focus-view infrastructure
+// ---------------------------------------------------------------------------
 
-    // Clear any remainder of screen to bottom
-    out << "\033[J";
+TUI::ListWindow TUI::clamp_window(ViewState& view, int total_rows, int viewport_rows) const {
+    ListWindow w;
+    w.total = std::max(0, total_rows);
+    w.count = std::max(0, std::min(std::max(1, viewport_rows), w.total));
 
-    // Output all at once
-    std::cout << out.str() << std::flush;
+    if (w.total == 0) {
+        view.cursor        = 0;
+        view.scroll_offset = 0;
+        return w;
+    }
+
+    // The cursor arrives from the key handler, which cannot know how long the
+    // list is; [End] deliberately overshoots and settles here.
+    view.cursor = std::max(0, std::min(view.cursor, w.total - 1));
+    w.cursor    = view.cursor;
+
+    // Scroll the minimum needed to keep the cursor on screen, so paging
+    // through a 700-row list never jumps the viewport.
+    int first = view.scroll_offset;
+    if (view.cursor < first)                first = view.cursor;
+    if (view.cursor >= first + w.count)     first = view.cursor - w.count + 1;
+    first = std::max(0, std::min(first, w.total - w.count));
+
+    view.scroll_offset = first;
+    w.first            = first;
+    return w;
+}
+
+int TUI::rows_left(const std::ostringstream& out, int height, int reserve) const {
+    const std::string so_far = out.str();
+    const int used = static_cast<int>(std::count(so_far.begin(), so_far.end(), '\n'));
+    return std::max(1, height - used - reserve);
+}
+
+void TUI::render_view_bar(std::ostringstream& out, const ViewState& view, const Config& cfg, int width) {
+    struct Tab { char key; View view; const char* label; };
+    static constexpr Tab tabs[] = {
+        {'0', View::Overview,    "overview"},
+        {'1', View::Cpu,         "cpu"},
+        {'2', View::Memory,      "memory"},
+        {'3', View::Gpu,         "gpu"},
+        {'4', View::Disk,        "disk"},
+        {'5', View::Network,     "net"},
+        {'6', View::Connections, "conn"},
+        {'7', View::Processes,   "proc"},
+        {'8', View::Sensors,     "sensors"},
+    };
+
+    // Build the strip a tab at a time and stop before it would wrap: a wrapped
+    // header pushes every following row down by one and the frame no longer
+    // lines up with the screen.
+    std::string plain;
+    std::string coloured;
+    for (const auto& tab : tabs) {
+        const bool active = (tab.view == view.view) ||
+                            (tab.view == View::Processes && view.view == View::Process);
+        const std::string label = std::string(1, tab.key) + ":" + tab.label + " ";
+        if (static_cast<int>(utils::display_width(plain + label)) + 2 > width) break;
+        plain += label;
+        coloured += active
+                  ? (bold() + c_accent() + std::string(1, tab.key) + ":" + tab.label + reset_color() + " ")
+                  : (c_dim() + std::string(1, tab.key) + ":" + c_dim() + tab.label + reset_color() + " ");
+    }
+
+    out << " " << coloured;
+
+    // The density indicator earns its place only if it fits.
+    const std::string density = Config::detail_name(cfg.detail_level);
+    const int used = static_cast<int>(utils::display_width(plain)) + 1;
+    if (used + static_cast<int>(density.size()) + 3 <= width) {
+        const int pad = width - used - static_cast<int>(density.size()) - 1;
+        for (int i = 0; i < pad; ++i) out << " ";
+        out << c_dim() << density << reset_color();
+    }
+    out << "\033[K\n";
+
+    out << c_border();
+    for (int i = 0; i < width; ++i) out << "─";
+    out << reset_color() << "\033[K\n";
+}
+
+void TUI::render_list_status(std::ostringstream& out, const ListWindow& window,
+                             const std::string& noun, const ViewState& view, int width) {
+    std::ostringstream text;
+    if (window.total == 0) {
+        text << "no " << noun;
+    } else {
+        text << noun << " " << (window.first + 1) << "-" << (window.first + window.count)
+             << " of " << window.total;
+    }
+    if (window.has_more_above()) text << "  ▲ more above";
+    if (window.has_more_below()) text << "  ▼ more below";
+    if (view.show_all)           text << "  [a] all";
+
+    out << " " << c_dim() << utils::column(text.str(), static_cast<size_t>(std::max(1, width - 1)))
+        << reset_color() << "\033[K\n";
+}
+
+void TUI::bar_row(std::ostringstream& out, const std::string& label, double percent, int width) {
+    // 2 margin + label + bar + 1 space + 6 digits + 2 for " %".
+    const int label_w = std::max(6, std::min(22, (width - 2) / 3));
+    const int bar_w   = std::max(6, width - 13 - label_w);
+    out << "  " << c_label() << utils::fit(label, static_cast<size_t>(label_w)) << reset_color()
+        << progress_bar(percent, bar_w) << " "
+        << usage_color(percent) << std::fixed << std::setprecision(1)
+        << std::setw(6) << percent << " %" << reset_color() << "\033[K\n";
+}
+
+void TUI::kv(std::ostringstream& out, const std::string& label, const std::string& value, int width) {
+    if (value.empty()) return;
+    // 2 columns of margin, then label and value share the rest.  The label
+    // shrinks first on a narrow terminal, because a truncated label is still
+    // recognisable and a truncated value is not.
+    const int label_w = std::max(6, std::min(22, (width - 2) / 3));
+    const int value_w = std::max(4, width - 2 - label_w);
+    out << "  " << c_label() << utils::fit(label, static_cast<size_t>(label_w)) << reset_color()
+        << c_value() << utils::column(value, static_cast<size_t>(value_w)) << reset_color()
+        << "\033[K\n";
+}
+
+// ---------------------------------------------------------------------------
+// CPU view
+// ---------------------------------------------------------------------------
+
+void TUI::render_cpu_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg,
+                          ViewState& view, int width, int height) {
+    const CpuStats& cpu = snap.cpu;
+
+    out << section_header("Processor", width) << "\033[K\n";
+    kv(out, "Model",        cpu.model, width);
+    kv(out, "Vendor",       cpu.vendor, width);
+
+    {
+        std::ostringstream topo;
+        topo << cpu.logical_cores << " logical";
+        if (cpu.physical_cores > 0) topo << " / " << cpu.physical_cores << " physical";
+        if (cpu.sockets.has_value()) topo << " on " << *cpu.sockets << " socket"
+                                          << (*cpu.sockets == 1 ? "" : "s");
+        if (cpu.threads_per_core.has_value()) topo << ", " << *cpu.threads_per_core << " thread/core";
+        kv(out, "Topology", topo.str(), width);
+    }
+
+    if (cpu.performance_cores.has_value() || cpu.efficiency_cores.has_value()) {
+        std::ostringstream hybrid;
+        hybrid << utils::format_opt(cpu.performance_cores) << " performance, "
+               << utils::format_opt(cpu.efficiency_cores)  << " efficiency";
+        kv(out, "Core clusters", hybrid.str(), width);
+    }
+
+    out << "\033[K\n";
+
+    bar_row(out, "Total", cpu.usage_percent, width);
+
+    {
+        std::ostringstream split;
+        split << "usr " << std::fixed << std::setprecision(1) << cpu.user_percent
+              << "  sys " << cpu.system_percent
+              << "  idle " << cpu.idle_percent
+              << "  iowait " << cpu.iowait_percent;
+        kv(out, "Time split", split.str(), width);
+
+        std::ostringstream rest;
+        rest << "nice " << std::fixed << std::setprecision(1) << cpu.nice_percent
+             << "  irq " << cpu.irq_percent
+             << "  steal " << cpu.steal_percent;
+        kv(out, "", rest.str(), width);
+    }
+
+    kv(out, "Frequency",     utils::format_opt(cpu.frequency_mhz, "MHz", 0), width);
+    kv(out, "Freq min/base/max",
+       utils::format_opt(cpu.min_frequency_mhz,  "", 0) + " / " +
+       utils::format_opt(cpu.base_frequency_mhz, "", 0) + " / " +
+       utils::format_opt(cpu.max_frequency_mhz,  "MHz", 0), width);
+    kv(out, "Temperature",   utils::format_opt(cpu.temperature_celsius, "°C"), width);
+    kv(out, "Thermal state", cpu.thermal_pressure, width);
+
+    if (cfg.detail_level >= DetailLevel::Detailed) {
+        kv(out, "Cache L1d / L1i",
+           utils::format_opt_bytes(cpu.cache_l1d_bytes) + " / " +
+           utils::format_opt_bytes(cpu.cache_l1i_bytes), width);
+        kv(out, "Cache L2 / L3",
+           utils::format_opt_bytes(cpu.cache_l2_bytes) + " / " +
+           utils::format_opt_bytes(cpu.cache_l3_bytes), width);
+        kv(out, "Context switches", utils::format_opt(cpu.context_switches_per_sec, "/s", 0), width);
+        kv(out, "Interrupts",       utils::format_opt(cpu.interrupts_per_sec, "/s", 0), width);
+        kv(out, "Forks",            utils::format_opt(cpu.forks_per_sec, "/s", 1), width);
+        kv(out, "Load 1/5/15",
+           utils::format_opt(std::optional<double>(snap.load.load_1min),  "", 2) + " / " +
+           utils::format_opt(std::optional<double>(snap.load.load_5min),  "", 2) + " / " +
+           utils::format_opt(std::optional<double>(snap.load.load_15min), "", 2), width);
+        kv(out, "Load per core", utils::format_opt(snap.load.load_per_core_1min, "", 2), width);
+    }
+
+    out << "\033[K\n";
+    out << " " << c_dim() << "Usage history" << reset_color() << "\033[K\n";
+    out << "  " << sparkline(cpu_history_, std::max(8, std::min(width - 4, 120)))
+        << "\033[K\n\033[K\n";
+
+    // Per-core table, scrollable: a 128-thread machine does not fit a screen.
+    if (!cpu.per_core.empty() && cfg.show_cpu_per_core) {
+        out << section_header("Cores", width) << "\033[K\n";
+
+        // Reserve: the column header printed just below, the list status
+        // line, and the footer.
+        const int viewport   = rows_left(out, height, 3);
+        const ListWindow win = clamp_window(view, static_cast<int>(cpu.per_core.size()), viewport);
+
+        const bool wide     = width >= 78;
+        const int  core_bar = std::max(8, std::min(28, width - (wide ? 52 : 34)));
+
+        out << c_dim() << "  " << utils::fit("CORE", 8)
+            << utils::fit("CLUSTER", wide ? 9 : 0)
+            << utils::fit_right("USE%", 7) << "  "
+            << utils::fit("", static_cast<size_t>(core_bar))
+            << utils::fit_right("FREQ", wide ? 10 : 0)
+            << reset_color() << "\033[K\n";
+
+        for (int i = win.first; i < win.first + win.count; ++i) {
+            const CoreStats& core = cpu.per_core[static_cast<size_t>(i)];
+            out << "  " << c_value() << utils::fit("#" + std::to_string(core.id), 8) << reset_color();
+            if (wide) out << c_dim() << utils::fit(core.cluster.empty() ? "-" : core.cluster, 9) << reset_color();
+            out << usage_color(core.usage_percent) << std::right << std::setw(6)
+                << std::fixed << std::setprecision(1) << core.usage_percent << "%" << reset_color()
+                << "  " << progress_bar(core.usage_percent, core_bar);
+            if (wide) {
+                out << " " << c_dim()
+                    << utils::fit_right(utils::format_opt(core.frequency_mhz, "", 0), 9)
+                    << reset_color();
+            }
+            out << "\033[K\n";
+        }
+        render_list_status(out, win, "cores", view, width);
+    }
+
+    if (cfg.detail_level >= DetailLevel::Full && !cpu.flags.empty()) {
+        out << "\033[K\n" << section_header("Instruction set", width) << "\033[K\n";
+        std::string line = "  ";
+        for (const auto& flag : cpu.flags) {
+            if (static_cast<int>(utils::display_width(line + flag)) + 1 >= width) {
+                out << c_dim() << line << reset_color() << "\033[K\n";
+                line = "  ";
+            }
+            line += flag + " ";
+        }
+        if (line.size() > 2) out << c_dim() << line << reset_color() << "\033[K\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory view
+// ---------------------------------------------------------------------------
+
+void TUI::render_memory_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width) {
+    const MemoryStats& m = snap.memory;
+
+    out << section_header("Physical memory", width) << "\033[K\n";
+    bar_row(out, "RAM", m.ram_usage_percent, width);
+
+    kv(out, "Total",      format_bytes(m.ram_total_bytes), width);
+    kv(out, "Used",       format_bytes(m.ram_used_bytes), width);
+    kv(out, "Available",  format_bytes(m.ram_available_bytes), width);
+    kv(out, "Free",       format_bytes(m.ram_free_bytes), width);
+    kv(out, "Cached",     format_bytes(m.ram_cached_bytes), width);
+    if (m.ram_buffer_bytes > 0) kv(out, "Buffers", format_bytes(m.ram_buffer_bytes), width);
+
+    out << "\033[K\n" << section_header("Breakdown", width) << "\033[K\n";
+    kv(out, "Active",      utils::format_opt_bytes(m.active_bytes), width);
+    kv(out, "Inactive",    utils::format_opt_bytes(m.inactive_bytes), width);
+    kv(out, "Wired",       utils::format_opt_bytes(m.wired_bytes), width);
+    kv(out, "Compressed",  utils::format_opt_bytes(m.compressed_bytes), width);
+    kv(out, "Shared",      utils::format_opt_bytes(m.shared_bytes), width);
+    kv(out, "Slab",        utils::format_opt_bytes(m.slab_bytes), width);
+    kv(out, "Dirty",       utils::format_opt_bytes(m.dirty_bytes), width);
+    kv(out, "Pressure",    utils::format_opt(m.pressure_percent, "%"), width);
+
+    out << "\033[K\n" << section_header("Swap & paging", width) << "\033[K\n";
+    if (m.swap_total_bytes > 0) {
+        bar_row(out, "Swap", m.swap_usage_percent, width);
+        kv(out, "Swap used", format_bytes(m.swap_used_bytes) + " of " +
+                             format_bytes(m.swap_total_bytes), width);
+    } else {
+        kv(out, "Swap", "not configured", width);
+    }
+    kv(out, "Commit charge",
+       m.commit_total_bytes.has_value()
+         ? utils::format_opt_bytes(m.commit_total_bytes) + " of " +
+           utils::format_opt_bytes(m.commit_limit_bytes)
+         : std::string(), width);
+    kv(out, "Page faults",   utils::format_opt(m.page_faults_per_sec, "/s", 0), width);
+    kv(out, "Major faults",  utils::format_opt(m.major_faults_per_sec, "/s", 0), width);
+    kv(out, "Page in / out",
+       utils::format_opt(m.page_ins_per_sec, "", 0) + " / " +
+       utils::format_opt(m.page_outs_per_sec, "/s", 0), width);
+    kv(out, "Swap in / out",
+       utils::format_opt(m.swap_ins_per_sec, "", 0) + " / " +
+       utils::format_opt(m.swap_outs_per_sec, "/s", 0), width);
+    if (snap.system.page_size_bytes.has_value()) {
+        kv(out, "Page size", utils::format_opt_bytes(snap.system.page_size_bytes), width);
+    }
+
+    out << "\033[K\n" << " " << c_dim() << "Usage history" << reset_color() << "\033[K\n";
+    out << "  " << sparkline(mem_history_, std::max(8, std::min(width - 4, 120))) << "\033[K\n";
+
+    // The biggest memory consumers answer "what is using my RAM", which is the
+    // question that sends anyone to a memory view in the first place.
+    if (cfg.detail_level >= DetailLevel::Normal && !snap.processes.empty()) {
+        out << "\033[K\n" << section_header("Largest consumers", width) << "\033[K\n";
+        std::vector<const ProcessStats*> by_rss;
+        by_rss.reserve(snap.processes.size());
+        for (const auto& p : snap.processes) by_rss.push_back(&p);
+        std::stable_sort(by_rss.begin(), by_rss.end(),
+                         [](const ProcessStats* a, const ProcessStats* b) {
+                             return a->mem_rss_bytes > b->mem_rss_bytes;
+                         });
+
+        const int rows = cfg.detail_level >= DetailLevel::Detailed ? 12 : 6;
+        const int name_w = std::max(10, std::min(30, width - 46));
+        out << c_dim() << "  " << utils::fit_right("PID", 7) << "  "
+            << utils::fit("COMMAND", static_cast<size_t>(name_w))
+            << utils::fit_right("RSS", 11) << utils::fit_right("VIRT", 11)
+            << utils::fit_right("MEM%", 8) << reset_color() << "\033[K\n";
+        for (int i = 0; i < rows && i < static_cast<int>(by_rss.size()); ++i) {
+            const ProcessStats& p = *by_rss[static_cast<size_t>(i)];
+            out << "  " << c_dim() << utils::fit_right(std::to_string(p.pid), 7) << reset_color()
+                << "  " << c_value() << utils::column(p.name, static_cast<size_t>(name_w)) << reset_color()
+                << c_value() << utils::fit_right(format_bytes(p.mem_rss_bytes), 11) << reset_color()
+                << c_dim()   << utils::fit_right(format_bytes(p.mem_vms_bytes), 11) << reset_color()
+                << usage_color(p.mem_percent) << utils::fit_right(
+                       utils::format_opt(std::optional<double>(p.mem_percent), "%", 1), 8)
+                << reset_color() << "\033[K\n";
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU view
+// ---------------------------------------------------------------------------
+
+void TUI::render_gpu_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width) {
+    if (snap.gpus.empty()) {
+        out << section_header("Graphics", width) << "\033[K\n";
+        out << "  " << c_dim() << "No GPU reported by this platform." << reset_color() << "\033[K\n";
+        return;
+    }
+
+    int index = 0;
+    for (const auto& g : snap.gpus) {
+        out << section_header("GPU " + std::to_string(index++) +
+                              (g.name.empty() ? "" : " — " + g.name), width) << "\033[K\n";
+        kv(out, "Vendor",   g.vendor, width);
+        kv(out, "Driver",   g.driver_version, width);
+        kv(out, "Cores",    utils::format_opt(g.gpu_cores), width);
+        kv(out, "Memory type", g.memory_type, width);
+
+        if (g.usage_percent.has_value()) {
+            bar_row(out, "Utilisation", *g.usage_percent, width);
+        } else {
+            kv(out, "Utilisation", "N/A", width);
+        }
+
+        if (g.memory_usage_percent.has_value()) {
+            bar_row(out, "VRAM", *g.memory_usage_percent, width);
+        }
+
+        kv(out, "VRAM total",  utils::format_opt_bytes(g.memory_total_bytes), width);
+        kv(out, "VRAM used",   utils::format_opt_bytes(g.memory_used_bytes), width);
+        kv(out, "VRAM free",   utils::format_opt_bytes(g.memory_free_bytes), width);
+
+        if (cfg.detail_level >= DetailLevel::Detailed) {
+            kv(out, "Core clock",   utils::format_opt(g.frequency_mhz, "MHz", 0), width);
+            kv(out, "Memory clock", utils::format_opt(g.memory_frequency_mhz, "MHz", 0), width);
+            kv(out, "Encoder",      utils::format_opt(g.encoder_percent, "%"), width);
+            kv(out, "Decoder",      utils::format_opt(g.decoder_percent, "%"), width);
+            kv(out, "Temperature",  utils::format_opt(g.temperature_celsius, "°C"), width);
+            kv(out, "Power draw",   utils::format_opt(g.power_watts, "W", 2), width);
+            kv(out, "Fan",          utils::format_opt(g.fan_percent, "%"), width);
+        }
+        out << "\033[K\n";
+    }
+
+    if (!gpu_history_.empty()) {
+        out << " " << c_dim() << "Utilisation history" << reset_color() << "\033[K\n";
+        out << "  " << sparkline(gpu_history_, std::max(8, std::min(width - 4, 120))) << "\033[K\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Disk view
+// ---------------------------------------------------------------------------
+
+void TUI::render_disk_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg,
+                           ViewState& view, int width, int height) {
+    out << section_header("Filesystems", width) << "\033[K\n";
+
+    const bool wide    = width >= 92;
+    const int  mount_w = std::max(12, std::min(34, width - (wide ? 62 : 44)));
+
+    out << c_dim() << "  " << utils::fit("MOUNTPOINT", static_cast<size_t>(mount_w))
+        << utils::fit("FS", wide ? 10 : 0)
+        << utils::fit_right("USED", 11) << utils::fit_right("SIZE", 11)
+        << utils::fit_right("USE%", 8)
+        << utils::fit_right("INODE%", wide ? 9 : 0)
+        << reset_color() << "\033[K\n";
+
+    // Disks and their I/O counters share the viewport, so the filesystem list
+    // takes at most half of what is free before the I/O table needs room.
+    const int fs_viewport = std::max(2, rows_left(out, height, 8) / 2);
+    const ListWindow win  = clamp_window(view, static_cast<int>(snap.disks.size()), fs_viewport);
+
+    for (int i = win.first; i < win.first + win.count; ++i) {
+        const DiskStats& d = snap.disks[static_cast<size_t>(i)];
+        out << "  " << c_value() << utils::column(d.mountpoint, static_cast<size_t>(mount_w)) << reset_color();
+        if (wide) out << c_dim() << utils::column(d.filesystem_type, 10) << reset_color();
+        out << c_value() << utils::fit_right(format_bytes(d.used_bytes), 11) << reset_color()
+            << c_dim()   << utils::fit_right(format_bytes(d.total_bytes), 11) << reset_color()
+            << usage_color(d.usage_percent)
+            << utils::fit_right(utils::format_opt(std::optional<double>(d.usage_percent), "%", 1), 8)
+            << reset_color();
+        if (wide) {
+            out << c_dim() << utils::fit_right(utils::format_opt(d.inode_usage_percent, "%", 1), 9)
+                << reset_color();
+        }
+        out << "\033[K\n";
+    }
+    render_list_status(out, win, "filesystems", view, width);
+
+    if (cfg.detail_level >= DetailLevel::Detailed) {
+        for (int i = win.first; i < win.first + win.count; ++i) {
+            const DiskStats& d = snap.disks[static_cast<size_t>(i)];
+            std::ostringstream detail;
+            detail << d.device;
+            if (!d.mount_options.empty()) detail << "  [" << d.mount_options << "]";
+            if (d.read_only) detail << "  read-only";
+            if (d.removable) detail << "  removable";
+            if (d.inodes_total.has_value()) {
+                detail << "  inodes " << utils::format_opt(d.inodes_used)
+                       << " / " << utils::format_opt(d.inodes_total);
+            }
+            out << "    " << c_dim()
+                << utils::column(d.mountpoint + ": " + detail.str(),
+                                 static_cast<size_t>(std::max(1, width - 5)))
+                << reset_color() << "\033[K\n";
+        }
+    }
+
+    out << "\033[K\n" << section_header("Device I/O", width) << "\033[K\n";
+    if (snap.disk_io.empty()) {
+        out << "  " << c_dim() << "No per-device counters available." << reset_color() << "\033[K\n";
+        return;
+    }
+
+    const int dev_w = std::max(8, std::min(20, width - (wide ? 74 : 52)));
+    out << c_dim() << "  " << utils::fit("DEVICE", static_cast<size_t>(dev_w))
+        << utils::fit_right("READ", 12) << utils::fit_right("WRITE", 12)
+        << utils::fit_right("IOPS r/w", 14)
+        << utils::fit_right("UTIL", wide ? 8 : 0)
+        << utils::fit_right("LAT r/w", wide ? 14 : 0)
+        << reset_color() << "\033[K\n";
+
+    for (const auto& io : snap.disk_io) {
+        std::ostringstream iops;
+        iops << std::fixed << std::setprecision(0)
+             << io.read_ops_per_sec << "/" << io.write_ops_per_sec;
+
+        out << "  " << c_value() << utils::column(io.device, static_cast<size_t>(dev_w)) << reset_color()
+            << c_good()  << utils::fit_right(format_bytes_per_sec(io.read_bytes_per_sec), 12) << reset_color()
+            << c_warn()  << utils::fit_right(format_bytes_per_sec(io.write_bytes_per_sec), 12) << reset_color()
+            << c_dim()   << utils::fit_right(iops.str(), 14) << reset_color();
+        if (wide) {
+            std::ostringstream lat;
+            lat << utils::format_opt(io.avg_read_latency_ms, "", 1) << "/"
+                << utils::format_opt(io.avg_write_latency_ms, "ms", 1);
+            out << c_dim() << utils::fit_right(utils::format_opt(io.util_percent, "%", 0), 8)
+                << utils::fit_right(lat.str(), 14) << reset_color();
+        }
+        out << "\033[K\n";
+    }
+
+    if (cfg.detail_level >= DetailLevel::Detailed) {
+        out << "\033[K\n";
+        for (const auto& io : snap.disk_io) {
+            std::ostringstream totals;
+            totals << io.device << ": read " << format_bytes(io.read_bytes_total)
+                   << " in " << io.read_ops_total << " ops, written "
+                   << format_bytes(io.write_bytes_total)
+                   << " in " << io.write_ops_total << " ops";
+            if (io.queue_depth.has_value()) {
+                totals << ", queue " << utils::format_opt(io.queue_depth, "", 2);
+            }
+            out << "    " << c_dim()
+                << utils::column(totals.str(), static_cast<size_t>(std::max(1, width - 5)))
+                << reset_color() << "\033[K\n";
+        }
+    }
+
+    // Which programs are actually touching the disk right now — the question
+    // that a device-level throughput number cannot answer.
+    if (cfg.detail_level >= DetailLevel::Normal && !snap.processes.empty()) {
+        // Current rate answers "what is hammering the disk right now"; the
+        // lifetime totals answer "how much has this program written", which on
+        // an idle machine is the only one of the two with anything in it.
+        const auto rate_of = [](const ProcessStats& p) {
+            return p.io_read_bytes_per_sec.value_or(0.0) +
+                   p.io_write_bytes_per_sec.value_or(0.0);
+        };
+        const auto total_of = [](const ProcessStats& p) {
+            return p.io_read_bytes_total.value_or(0) + p.io_write_bytes_total.value_or(0);
+        };
+
+        std::vector<const ProcessStats*> writers;
+        for (const auto& p : snap.processes) {
+            if (rate_of(p) > 0.0 || total_of(p) > 0) writers.push_back(&p);
+        }
+
+        out << "\033[K\n" << section_header("Disk use by process", width) << "\033[K\n";
+        if (writers.empty()) {
+            out << "  " << c_dim()
+                << utils::column("No per-process disk counters are readable here.",
+                                 static_cast<size_t>(std::max(1, width - 3)))
+                << reset_color() << "\033[K\n";
+        } else {
+            std::stable_sort(writers.begin(), writers.end(),
+                             [&](const ProcessStats* a, const ProcessStats* b) {
+                                 if (rate_of(*a) != rate_of(*b)) return rate_of(*a) > rate_of(*b);
+                                 return total_of(*a) > total_of(*b);
+                             });
+
+            const bool show_totals = width >= 96;
+            const int  name_w = std::max(10, std::min(30, width - (show_totals ? 62 : 38)));
+            out << c_dim() << "  " << utils::fit_right("PID", 7) << "  "
+                << utils::fit("COMMAND", static_cast<size_t>(name_w))
+                << utils::fit_right("READ/s", 12) << utils::fit_right("WRITE/s", 12)
+                << utils::fit_right("READ TOTAL", show_totals ? 12 : 0)
+                << utils::fit_right("WRITE TOTAL", show_totals ? 12 : 0)
+                << reset_color() << "\033[K\n";
+
+            const int rows = cfg.detail_level >= DetailLevel::Detailed ? 10 : 5;
+            for (int i = 0; i < rows && i < static_cast<int>(writers.size()); ++i) {
+                const ProcessStats& p = *writers[static_cast<size_t>(i)];
+                out << "  " << c_dim() << utils::fit_right(std::to_string(p.pid), 7) << reset_color()
+                    << "  " << c_value() << utils::column(p.name, static_cast<size_t>(name_w)) << reset_color()
+                    << c_good() << utils::fit_right(utils::format_opt_rate(p.io_read_bytes_per_sec), 12) << reset_color()
+                    << c_warn() << utils::fit_right(utils::format_opt_rate(p.io_write_bytes_per_sec), 12) << reset_color();
+                if (show_totals) {
+                    out << c_dim()
+                        << utils::fit_right(utils::format_opt_bytes(p.io_read_bytes_total), 12)
+                        << utils::fit_right(utils::format_opt_bytes(p.io_write_bytes_total), 12)
+                        << reset_color();
+                }
+                out << "\033[K\n";
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Network view
+// ---------------------------------------------------------------------------
+
+void TUI::render_network_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg,
+                              ViewState& view, int width, int height) {
+    const NetGlobalStats& g = snap.net_global;
+
+    out << section_header("Network", width) << "\033[K\n";
+    kv(out, "Default gateway", g.default_gateway_v4, width);
+    kv(out, "Gateway (IPv6)",  g.default_gateway_v6, width);
+    {
+        std::string dns;
+        for (const auto& server : g.dns_servers) {
+            if (!dns.empty()) dns += "  ";
+            dns += server;
+        }
+        kv(out, "DNS servers", dns, width);
+    }
+    kv(out, "Search domain", g.domain, width);
+    {
+        std::ostringstream sockets;
+        sockets << g.tcp_established << " established, " << g.tcp_listen << " listening, "
+                << g.tcp_time_wait << " time-wait, " << g.udp_sockets << " udp";
+        kv(out, "Sockets", sockets.str(), width);
+    }
+
+    out << "\033[K\n";
+    const int spark_w = std::max(8, std::min(width - 12, 100));
+    out << "  " << c_good() << utils::fit("RX", 6) << reset_color()
+        << sparkline(net_rx_history_, spark_w) << "\033[K\n";
+    out << "  " << c_warn() << utils::fit("TX", 6) << reset_color()
+        << sparkline(net_tx_history_, spark_w) << "\033[K\n";
+
+    out << "\033[K\n" << section_header("Interfaces", width) << "\033[K\n";
+
+    // Hide interfaces that never carried traffic unless asked, otherwise a Mac
+    // buries the real interface under twenty utun/bridge entries.
+    std::vector<const NetworkStats*> shown;
+    for (const auto& n : snap.network) {
+        if (cfg.excluded_interfaces.count(n.name) > 0) continue;
+        const bool idle = n.rx_bytes_total == 0 && n.tx_bytes_total == 0;
+        if (idle && !cfg.show_network_inactive && !view.show_all) continue;
+        shown.push_back(&n);
+    }
+
+    // Margin, the two rate columns, the gap and the state flag are fixed; the
+    // interface name and its address share whatever is left, and the link
+    // speed is taken only when the row still fits with it.
+    const bool show_link = width >= 96;
+    int   net_remaining  = width - 2 /*margin*/ - 12 - 12 - 2 /*gap*/ - 6 /*state*/;
+    if (show_link) net_remaining -= 11;
+
+    const int name_w = std::max(6, std::min(16, net_remaining / 3));
+    const int addr_w = std::max(6, net_remaining - name_w);
+
+    out << c_dim() << "  " << utils::fit("INTERFACE", static_cast<size_t>(name_w))
+        << utils::fit("ADDRESS", static_cast<size_t>(addr_w))
+        << utils::fit_right("RX", 12) << utils::fit_right("TX", 12)
+        << utils::fit_right("LINK", show_link ? 11 : 0)
+        << "  " << utils::fit("STATE", 6)
+        << reset_color() << "\033[K\n";
+
+    // The detailed level prints two extra lines under each interface, and the
+    // bandwidth table below needs room of its own.
+    int viewport = rows_left(out, height, 12);
+    if (cfg.detail_level >= DetailLevel::Detailed) viewport /= 3;
+    const ListWindow win = clamp_window(view, static_cast<int>(shown.size()), std::max(1, viewport));
+
+    for (int i = win.first; i < win.first + win.count; ++i) {
+        const NetworkStats& n = *shown[static_cast<size_t>(i)];
+        out << "  " << c_value() << utils::column(n.name, static_cast<size_t>(name_w)) << reset_color()
+            << c_dim()  << utils::column(n.ip_address.empty() ? "-" : n.ip_address,
+                                         static_cast<size_t>(addr_w)) << reset_color()
+            << c_good() << utils::fit_right(format_bytes_per_sec(n.rx_bytes_per_sec), 12) << reset_color()
+            << c_warn() << utils::fit_right(format_bytes_per_sec(n.tx_bytes_per_sec), 12) << reset_color();
+        if (show_link) {
+            out << c_dim() << utils::fit_right(utils::format_opt(n.speed_mbps, "Mbps"), 11) << reset_color();
+        }
+        out << "  " << (n.is_up ? c_good() : c_dim()) << utils::fit(n.is_up ? "up" : "down", 6)
+            << reset_color() << "\033[K\n";
+
+        if (cfg.detail_level >= DetailLevel::Detailed) {
+            std::ostringstream detail;
+            detail << "MAC " << (n.mac_address.empty() ? "N/A" : n.mac_address)
+                   << "  MTU " << utils::format_opt(n.mtu)
+                   << "  " << (n.duplex.empty() ? "duplex N/A" : n.duplex + " duplex");
+            if (n.is_wireless) detail << "  wireless";
+            if (!n.ip6_address.empty()) detail << "  " << n.ip6_address;
+            out << "    " << c_dim()
+                << utils::column(detail.str(), static_cast<size_t>(std::max(1, width - 5)))
+                << reset_color() << "\033[K\n";
+
+            std::ostringstream counters;
+            counters << "total rx " << format_bytes(n.rx_bytes_total)
+                     << " / tx " << format_bytes(n.tx_bytes_total)
+                     << "  packets " << n.rx_packets_total << "/" << n.tx_packets_total
+                     << "  errors " << n.rx_errors << "/" << n.tx_errors
+                     << "  dropped " << n.rx_dropped << "/" << n.tx_dropped;
+            out << "    " << c_dim()
+                << utils::column(counters.str(), static_cast<size_t>(std::max(1, width - 5)))
+                << reset_color() << "\033[K\n";
+        }
+    }
+    render_list_status(out, win, "interfaces", view, width);
+
+    // Per-process bandwidth, where the platform can attribute it.
+    if (cfg.detail_level >= DetailLevel::Normal) {
+        std::vector<const ProcessStats*> talkers;
+        for (const auto& p : snap.processes) {
+            if (p.tx_bytes_per_sec.value_or(0.0) > 0.0) talkers.push_back(&p);
+        }
+        out << "\033[K\n" << section_header("Upload by process", width) << "\033[K\n";
+        if (talkers.empty()) {
+            out << "  " << c_dim()
+                << utils::column(NetConnectionsMonitor::bandwidth_attribution_supported()
+                                   ? "No process has sent measurable traffic since the last refresh."
+                                   : "This platform exposes no per-process byte counters to an "
+                                     "unprivileged process, so sysmon reports N/A rather than a guess.",
+                                 static_cast<size_t>(std::max(1, width - 3)))
+                << reset_color() << "\033[K\n";
+        } else {
+            std::stable_sort(talkers.begin(), talkers.end(),
+                             [](const ProcessStats* a, const ProcessStats* b) {
+                                 return a->tx_bytes_per_sec.value_or(0.0) >
+                                        b->tx_bytes_per_sec.value_or(0.0);
+                             });
+            const int proc_w = std::max(10, std::min(30, width - 34));
+            out << c_dim() << "  " << utils::fit_right("PID", 7) << "  "
+                << utils::fit("COMMAND", static_cast<size_t>(proc_w))
+                << utils::fit_right("TX", 12) << utils::fit_right("SOCKETS", 9)
+                << reset_color() << "\033[K\n";
+            const int rows = cfg.detail_level >= DetailLevel::Detailed ? 12 : 6;
+            for (int i = 0; i < rows && i < static_cast<int>(talkers.size()); ++i) {
+                const ProcessStats& p = *talkers[static_cast<size_t>(i)];
+                out << "  " << c_dim() << utils::fit_right(std::to_string(p.pid), 7) << reset_color()
+                    << "  " << c_value() << utils::column(p.name, static_cast<size_t>(proc_w)) << reset_color()
+                    << c_warn() << utils::fit_right(utils::format_opt_rate(p.tx_bytes_per_sec), 12) << reset_color()
+                    << c_dim() << utils::fit_right(utils::format_opt(p.socket_count), 9) << reset_color()
+                    << "\033[K\n";
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connections view
+// ---------------------------------------------------------------------------
+
+void TUI::render_connections_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg,
+                                  ViewState& view, int width, int height) {
+    out << section_header("Connections", width) << "\033[K\n";
+
+    const std::vector<NetConnectionStats>& conns = snap.connections;
+
+    // Budget the row from the terminal outwards rather than from a table of
+    // guessed constants: margin, protocol and the gap are fixed, the optional
+    // columns are taken only while they fit, and the two addresses share what
+    // is left with the process name.
+    const bool show_state = width >= 52;
+    const bool show_pid   = width >= 100;
+
+    int remaining = width - 2 /*margin*/ - 7 /*protocol*/ - 2 /*gap*/;
+    if (show_state) remaining -= 13;
+    if (show_pid)   remaining -= 8;
+
+    const int proc_w = std::max(6, std::min(24, remaining / 5));
+    remaining -= proc_w;
+    const int addr_w = std::max(9, remaining / 2);
+
+    out << c_dim() << "  " << utils::fit("PROTO", 7)
+        << utils::fit("LOCAL", static_cast<size_t>(addr_w))
+        << utils::fit("REMOTE", static_cast<size_t>(addr_w))
+        << utils::fit("STATE", show_state ? 13 : 0)
+        << utils::fit_right("PID", show_pid ? 8 : 0)
+        << "  " << utils::fit("PROCESS", static_cast<size_t>(proc_w))
+        << reset_color() << "\033[K\n";
+
+    const int viewport = rows_left(out, height, 3);
+    const ListWindow win = clamp_window(view, static_cast<int>(conns.size()), viewport);
+
+    for (int i = win.first; i < win.first + win.count; ++i) {
+        const NetConnectionStats& c = conns[static_cast<size_t>(i)];
+        const std::string local  = c.local_addr  + ":" + std::to_string(c.local_port);
+        const std::string remote = c.remote_port == 0 ? "-"
+                                 : c.remote_addr + ":" + std::to_string(c.remote_port);
+
+        std::string state_color = c_dim();
+        if (c.state == "ESTABLISHED") state_color = c_good();
+        else if (c.state == "LISTEN") state_color = c_accent();
+
+        out << "  " << c_dim()  << utils::column(c.protocol, 7) << reset_color()
+            << c_value() << utils::column(local,  static_cast<size_t>(addr_w)) << reset_color()
+            << c_value() << utils::column(remote, static_cast<size_t>(addr_w)) << reset_color();
+        if (show_state) out << state_color << utils::column(c.state, 13) << reset_color();
+        if (show_pid) {
+            out << c_dim() << utils::fit_right(c.pid > 0 ? std::to_string(c.pid) : "-", 8) << reset_color();
+        }
+        out << "  " << c_value()
+            << utils::column(c.process_name.empty() ? "-" : c.process_name, static_cast<size_t>(proc_w))
+            << reset_color() << "\033[K\n";
+    }
+    render_list_status(out, win, "connections", view, width);
+
+    if (!cfg.connections_show_listen && !view.show_all) {
+        out << " " << c_dim()
+            << utils::column("Listening sockets are hidden; press [a] or start with --listen.",
+                             static_cast<size_t>(std::max(1, width - 1)))
+            << reset_color() << "\033[K\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sensors view
+// ---------------------------------------------------------------------------
+
+void TUI::render_sensors_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg,
+                              ViewState& view, int width, int height) {
+    const TemperatureStats& t = snap.temperatures;
+
+    out << section_header("Sensors", width) << "\033[K\n";
+    kv(out, "CPU package", utils::format_opt(t.cpu_package, "°C"), width);
+    kv(out, "Hottest",
+       t.hottest_celsius.has_value()
+         ? utils::format_opt(t.hottest_celsius, "°C") +
+           (t.hottest_name.empty() ? "" : "  (" + t.hottest_name + ")")
+         : std::string("N/A"), width);
+    if (!snap.cpu.thermal_pressure.empty()) {
+        kv(out, "Thermal pressure", snap.cpu.thermal_pressure, width);
+    }
+
+    out << "\033[K\n";
+    if (t.sensors.empty()) {
+        out << "  " << c_dim()
+            << utils::column("No temperature sensors are readable without privileges here.",
+                             static_cast<size_t>(std::max(1, width - 3)))
+            << reset_color() << "\033[K\n";
+    } else {
+        const bool wide   = width >= 84;
+        const int  name_w = std::max(12, std::min(32, width - (wide ? 52 : 34)));
+        out << c_dim() << "  " << utils::fit("SENSOR", static_cast<size_t>(name_w))
+            << utils::fit("CHIP", wide ? 16 : 0)
+            << utils::fit_right("TEMP", 10)
+            << utils::fit_right("HIGH", wide ? 9 : 0)
+            << utils::fit_right("CRIT", wide ? 9 : 0)
+            << reset_color() << "\033[K\n";
+
+        // The fan and battery sections below still need their rows.
+        const int reserve    = 4 + static_cast<int>(t.fans.size()) +
+                               (snap.battery.present ? 10 : 0);
+        const int viewport   = rows_left(out, height, reserve);
+        const ListWindow win = clamp_window(view, static_cast<int>(t.sensors.size()), viewport);
+
+        for (int i = win.first; i < win.first + win.count; ++i) {
+            const SensorReading& s = t.sensors[static_cast<size_t>(i)];
+            out << "  " << c_value() << utils::column(s.name, static_cast<size_t>(name_w)) << reset_color();
+            if (wide) out << c_dim() << utils::column(s.chip, 16) << reset_color();
+            out << temp_color(s.temperature_celsius)
+                << utils::fit_right(
+                       utils::format_opt(std::optional<double>(s.temperature_celsius), "°C", 1), 10)
+                << reset_color();
+            if (wide) {
+                out << c_dim() << utils::fit_right(utils::format_opt(s.high, "", 0), 9)
+                    << utils::fit_right(utils::format_opt(s.critical, "", 0), 9) << reset_color();
+            }
+            out << "\033[K\n";
+        }
+        render_list_status(out, win, "sensors", view, width);
+    }
+
+    out << "\033[K\n" << section_header("Fans", width) << "\033[K\n";
+    if (t.fans.empty()) {
+        out << "  " << c_dim()
+            << utils::column("No fan tachometers exposed on this platform.",
+                             static_cast<size_t>(std::max(1, width - 3)))
+            << reset_color() << "\033[K\n";
+    } else {
+        for (const auto& f : t.fans) {
+            std::ostringstream value;
+            value << std::fixed << std::setprecision(0) << f.rpm << " rpm";
+            if (f.min_rpm.has_value() || f.max_rpm.has_value()) {
+                value << "  (" << utils::format_opt(f.min_rpm, "", 0) << " - "
+                      << utils::format_opt(f.max_rpm, "", 0) << ")";
+            }
+            kv(out, f.name.empty() ? "fan" : f.name, value.str(), width);
+        }
+    }
+
+    if (snap.battery.present) {
+        out << "\033[K\n" << section_header("Battery", width) << "\033[K\n";
+        kv(out, "Charge",       utils::format_opt(snap.battery.percent, "%"), width);
+        kv(out, "State",        snap.battery.state, width);
+        kv(out, "Health",       utils::format_opt(snap.battery.health_percent, "%"), width);
+        kv(out, "Cycles",       utils::format_opt(snap.battery.cycle_count), width);
+        kv(out, "Temperature",  utils::format_opt(snap.battery.temperature_celsius, "°C"), width);
+        kv(out, "Voltage",      utils::format_opt(snap.battery.voltage_volts, "V", 3), width);
+        kv(out, "Power",        utils::format_opt(snap.battery.power_watts, "W", 2), width);
+        if (cfg.detail_level >= DetailLevel::Detailed) {
+            kv(out, "Capacity design",  utils::format_opt(snap.battery.design_capacity_mah, "mAh"), width);
+            kv(out, "Capacity full",    utils::format_opt(snap.battery.full_capacity_mah, "mAh"), width);
+            kv(out, "Capacity now",     utils::format_opt(snap.battery.current_capacity_mah, "mAh"), width);
+            kv(out, "Technology",       snap.battery.technology, width);
+            kv(out, "Vendor",           snap.battery.vendor, width);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Processes view
+// ---------------------------------------------------------------------------
+
+void TUI::render_processes_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg,
+                                ViewState& view, int width, int height) {
+    const std::vector<ProcessStats>& procs = snap.processes;
+
+    {
+        std::ostringstream title;
+        title << "Processes — " << snap.load.total_processes << " total, "
+              << snap.load.running_processes << " running, "
+              << snap.load.total_threads << " threads, sorted by "
+              << Config::sort_name(cfg.proc_sort);
+        out << section_header(title.str(), width) << "\033[K\n";
+    }
+
+    // Column budget, widest first: everything except the command name has a
+    // fixed width, so the name absorbs whatever is left.
+    const bool show_user = width >= 76;
+    const bool show_io   = width >= 108 && cfg.detail_level >= DetailLevel::Detailed;
+    const bool show_time = width >= 92;
+    const int  user_w    = show_user ? 12 : 0;
+    const int  io_w      = show_io ? 22 : 0;
+    const int  time_w    = show_time ? 10 : 0;
+    const int  fixed     = 2 + 7 + 2 + user_w + 7 + 8 + 11 + 6 + time_w + io_w + 4;
+    const int  name_w    = std::max(8, std::min(36, width - fixed));
+
+    out << c_dim() << "  " << utils::fit_right("PID", 7) << "  "
+        << utils::fit("COMMAND", static_cast<size_t>(name_w))
+        << utils::fit("USER", static_cast<size_t>(user_w))
+        << utils::fit_right("CPU%", 7) << utils::fit_right("MEM%", 8)
+        << utils::fit_right("RSS", 11) << utils::fit_right("THR", 6)
+        << utils::fit_right("TIME", static_cast<size_t>(time_w))
+        << (show_io ? utils::fit_right("DISK r/w", static_cast<size_t>(io_w)) : "")
+        << "  S" << reset_color() << "\033[K\n";
+
+    // Below the list: the status line, the key hint, and the footer.
+    const int viewport   = rows_left(out, height, 4);
+    const ListWindow win = clamp_window(view, static_cast<int>(procs.size()), viewport);
+
+    // Publish the selection so [Enter] inspects the row the user is looking at.
+    view.selected_pid = (win.cursor >= 0 && win.cursor < static_cast<int>(procs.size()))
+                      ? procs[static_cast<size_t>(win.cursor)].pid : -1;
+
+    for (int i = win.first; i < win.first + win.count; ++i) {
+        const ProcessStats& p = procs[static_cast<size_t>(i)];
+        const bool selected = win.is_cursor(i);
+
+        // The cursor row is inverted rather than coloured, so it stays visible
+        // whatever the CPU and memory colours happen to be.
+        if (selected) out << "\033[7m";
+
+        out << "  " << (selected ? "" : c_dim()) << utils::fit_right(std::to_string(p.pid), 7)
+            << (selected ? "" : reset_color())
+            << "  " << (selected ? "" : c_value())
+            << utils::column(p.name, static_cast<size_t>(name_w))
+            << (selected ? "" : reset_color());
+        if (show_user) {
+            out << (selected ? "" : c_dim()) << utils::column(p.user, static_cast<size_t>(user_w))
+                << (selected ? "" : reset_color());
+        }
+        out << (selected ? "" : usage_color(p.cpu_percent))
+            << utils::fit_right(utils::format_opt(std::optional<double>(p.cpu_percent), "", 1), 7)
+            << (selected ? "" : reset_color())
+            << (selected ? "" : usage_color(p.mem_percent))
+            << utils::fit_right(utils::format_opt(std::optional<double>(p.mem_percent), "", 1), 8)
+            << (selected ? "" : reset_color())
+            << (selected ? "" : c_value()) << utils::fit_right(format_bytes(p.mem_rss_bytes), 11)
+            << (selected ? "" : reset_color())
+            << (selected ? "" : c_dim()) << utils::fit_right(std::to_string(p.threads), 6)
+            << (selected ? "" : reset_color());
+        if (show_time) {
+            out << (selected ? "" : c_dim())
+                << utils::fit_right(utils::format_duration_seconds(p.cpu_time_seconds),
+                                    static_cast<size_t>(time_w))
+                << (selected ? "" : reset_color());
+        }
+        if (show_io) {
+            const std::string io = utils::format_opt_rate(p.io_read_bytes_per_sec) + " " +
+                                   utils::format_opt_rate(p.io_write_bytes_per_sec);
+            out << (selected ? "" : c_dim()) << utils::fit_right(io, static_cast<size_t>(io_w))
+                << (selected ? "" : reset_color());
+        }
+        out << "  " << (selected ? "" : c_accent()) << utils::fit(p.state, 1)
+            << reset_color() << "\033[K\n";
+    }
+
+    render_list_status(out, win, "processes", view, width);
+    out << " " << c_dim()
+        << utils::column("[Up/Down] select  [PgUp/PgDn] page  [Enter] inspect  "
+                         "[o] sort  [a] no limit",
+                         static_cast<size_t>(std::max(1, width - 1)))
+        << reset_color() << "\033[K\n";
+}
+
+// ---------------------------------------------------------------------------
+// Single-process inspector
+// ---------------------------------------------------------------------------
+
+void TUI::render_process_detail_view(std::ostringstream& out, const Snapshot& snap, const Config& cfg,
+                                     ViewState& view, int width, int height) {
+    const ProcessStats* proc = nullptr;
+    for (const auto& p : snap.processes) {
+        if (p.pid == view.selected_pid) { proc = &p; break; }
+    }
+
+    if (proc == nullptr) {
+        out << section_header("Process", width) << "\033[K\n";
+        out << "  " << c_dim()
+            << utils::column("Process " + std::to_string(view.selected_pid) +
+                             " is gone. [Esc] or [7] returns to the list.",
+                             static_cast<size_t>(std::max(1, width - 3)))
+            << reset_color() << "\033[K\n";
+        return;
+    }
+
+    out << section_header("Process " + std::to_string(proc->pid) + " — " + proc->name, width)
+        << "\033[K\n";
+
+    kv(out, "Command",        proc->cmdline.empty() ? proc->name : proc->cmdline, width);
+    kv(out, "User",           proc->user, width);
+    kv(out, "Parent PID",     std::to_string(proc->ppid), width);
+    kv(out, "State",          proc->state, width);
+    kv(out, "Nice",           utils::format_opt(proc->nice), width);
+    kv(out, "Threads",        std::to_string(proc->threads), width);
+    if (proc->start_time > 0) kv(out, "Started", utils::format_time(proc->start_time), width);
+
+    out << "\033[K\n" << section_header("Resources", width) << "\033[K\n";
+    bar_row(out, "CPU",    proc->cpu_percent, width);
+    bar_row(out, "Memory", proc->mem_percent, width);
+
+    kv(out, "CPU time",       utils::format_duration_seconds(proc->cpu_time_seconds), width);
+    kv(out, "Resident (RSS)", format_bytes(proc->mem_rss_bytes), width);
+    kv(out, "Virtual",        format_bytes(proc->mem_vms_bytes), width);
+    kv(out, "Open files",     utils::format_opt(proc->open_files), width);
+    kv(out, "Disk read",      utils::format_opt_rate(proc->io_read_bytes_per_sec), width);
+    kv(out, "Disk write",     utils::format_opt_rate(proc->io_write_bytes_per_sec), width);
+    kv(out, "Disk total r/w",
+       utils::format_opt_bytes(proc->io_read_bytes_total) + " / " +
+       utils::format_opt_bytes(proc->io_write_bytes_total), width);
+    kv(out, "Network sent",   utils::format_opt_rate(proc->tx_bytes_per_sec), width);
+    kv(out, "Network received",
+       proc->rx_bytes_per_sec.has_value()
+         ? utils::format_opt_rate(proc->rx_bytes_per_sec)
+         : std::string("N/A (no per-process receive counter)"), width);
+    kv(out, "Sockets",        utils::format_opt(proc->socket_count), width);
+
+    // This process's own connections, picked out of the global list.
+    std::vector<const NetConnectionStats*> own;
+    for (const auto& c : snap.connections) {
+        if (c.pid == proc->pid) own.push_back(&c);
+    }
+    if (!own.empty()) {
+        out << "\033[K\n" << section_header("Connections", width) << "\033[K\n";
+        const int addr_w = std::max(14, std::min(28, (width - 30) / 2));
+        // Half of what is free; the open-files section takes the rest.
+        const int rows   = std::max(2, rows_left(out, height, 8) / 2);
+        for (int i = 0; i < rows && i < static_cast<int>(own.size()); ++i) {
+            const NetConnectionStats& c = *own[static_cast<size_t>(i)];
+            out << "  " << c_dim() << utils::column(c.protocol, 7) << reset_color()
+                << c_value() << utils::column(c.local_addr + ":" + std::to_string(c.local_port),
+                                              static_cast<size_t>(addr_w)) << reset_color()
+                << c_value() << utils::column(c.remote_port == 0 ? "-"
+                                              : c.remote_addr + ":" + std::to_string(c.remote_port),
+                                              static_cast<size_t>(addr_w)) << reset_color()
+                << c_dim() << c.state << reset_color() << "\033[K\n";
+        }
+        if (static_cast<int>(own.size()) > rows) {
+            out << "  " << c_dim() << "… " << (own.size() - static_cast<size_t>(rows))
+                << " more" << reset_color() << "\033[K\n";
+        }
+    }
+
+    // Open descriptors: what the process is actually reading and writing.
+    out << "\033[K\n" << section_header("Open files", width) << "\033[K\n";
+    if (!snap.selected_process_files.has_value()) {
+        out << "  " << c_dim() << "Not collected." << reset_color() << "\033[K\n";
+        return;
+    }
+
+    const OpenFilesResult& files = *snap.selected_process_files;
+    if (files.status != OpenFilesStatus::Ok) {
+        out << "  " << c_dim()
+            << utils::column(files.reason(), static_cast<size_t>(std::max(1, width - 3)))
+            << reset_color() << "\033[K\n";
+        return;
+    }
+    if (files.files.empty()) {
+        out << "  " << c_dim() << "None open." << reset_color() << "\033[K\n";
+        return;
+    }
+
+    const int path_w = std::max(20, width - 26);
+    out << c_dim() << "  " << utils::fit_right("FD", 5) << "  "
+        << utils::fit("TYPE", 8) << utils::fit("MODE", 5)
+        << utils::fit("PATH", static_cast<size_t>(path_w))
+        << reset_color() << "\033[K\n";
+
+    const int rows = rows_left(out, height, 2);
+    int shown = 0;
+    for (const auto& f : files.files) {
+        if (++shown > rows && cfg.detail_level < DetailLevel::Full) break;
+        out << "  " << c_dim() << utils::fit_right(std::to_string(f.fd), 5) << reset_color()
+            << "  " << c_dim()   << utils::column(f.type, 8) << reset_color()
+            << c_dim()   << utils::column(f.mode, 5) << reset_color()
+            << c_value() << utils::column(f.path, static_cast<size_t>(path_w)) << reset_color()
+            << "\033[K\n";
+    }
+    if (shown > rows) {
+        out << "  " << c_dim() << "… " << (files.files.size() - static_cast<size_t>(rows))
+            << " more; press [+] for full detail" << reset_color() << "\033[K\n";
+    }
 }
