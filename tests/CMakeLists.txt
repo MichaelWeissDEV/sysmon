@@ -26,7 +26,10 @@ macro(sysmon_test name source)
     add_executable(${name} ${source})
     target_link_libraries(${name} PRIVATE sysmon_lib GTest::gtest_main)
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
-    gtest_discover_tests(${name})
+    # DISCOVERY_TIMEOUT: the 5s default is a *build* failure when it
+    # expires, and a loaded parallel build on a shared CI runner beats
+    # it often enough to red-light the matrix at random.
+    gtest_discover_tests(${name} DISCOVERY_TIMEOUT 60)
 endmacro()
 
 # ---------------------------------------------------------------------------
@@ -46,13 +49,26 @@ sysmon_test(test_temperature_monitor   test_temperature_monitor.cpp)
 sysmon_test(test_disk_io_monitor       test_disk_io_monitor.cpp)
 sysmon_test(test_process_monitor       test_process_monitor.cpp)
 sysmon_test(test_text_renderer         test_text_renderer.cpp)
+sysmon_test(test_json_renderer         test_json_renderer.cpp)
+sysmon_test(test_battery_monitor       test_battery_monitor.cpp)
+sysmon_test(test_terminal              test_terminal.cpp)
 
 # ---------------------------------------------------------------------------
 # CLI smoke tests
 # ---------------------------------------------------------------------------
+add_executable(test_tui_pty test_tui_pty.cpp)
+target_link_libraries(test_tui_pty PRIVATE sysmon_lib GTest::gtest_main)
+target_include_directories(test_tui_pty PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(test_tui_pty PRIVATE
+    SYSMON_BINARY_PATH="${CMAKE_CURRENT_BINARY_DIR}/../sysmon")
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_tui_pty PRIVATE util)
+endif()
+gtest_discover_tests(test_tui_pty DISCOVERY_TIMEOUT 60)
+
 add_executable(test_cli test_cli.cpp)
 target_link_libraries(test_cli PRIVATE sysmon_lib GTest::gtest_main)
 target_include_directories(test_cli PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_definitions(test_cli PRIVATE
     SYSMON_BINARY_PATH="${CMAKE_CURRENT_BINARY_DIR}/../sysmon")
-gtest_discover_tests(test_cli)
+gtest_discover_tests(test_cli DISCOVERY_TIMEOUT 60)

@@ -27,6 +27,9 @@ jobs:
           ./build/sysmon --help
           ./build/sysmon --once --no-tui
 
+      - name: JSON output is parseable
+        run: ./build/sysmon --json | python3 -m json.tool > /dev/null
+
       - name: Install smoke test
         run: |
           cmake --install build --prefix "$PWD/stage"
@@ -105,6 +108,55 @@ jobs:
         run: |
           cmake --install build --prefix "$PWD/stage"
           ./stage/bin/sysmon --version
+
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DBUILD_TESTING=ON -DSYSMON_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Debug --output-on-failure
+
+      - name: CLI smoke tests
+        run: |
+          .\build\Debug\sysmon.exe --version
+          .\build\Debug\sysmon.exe --help
+          .\build\Debug\sysmon.exe --once --no-tui
+
+      - name: JSON output is parseable
+        shell: pwsh
+        run: |
+          .\build\Debug\sysmon.exe --json | ConvertFrom-Json | Out-Null
+          Write-Host "JSON parsed successfully"
+
+  windows-mingw:
+    name: Windows (MinGW cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64
+
+      - name: Generate version header
+        run: cmake -S . -B build -DBUILD_TESTING=OFF
+
+      - name: Cross-compile
+        run: |
+          x86_64-w64-mingw32-g++-posix -std=c++20 -O2 \
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wno-sign-conversion -Werror \
+            -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0601 \
+            -I include -I build/include src/*.cpp -o sysmon.exe \
+            -liphlpapi -lpsapi -lws2_32 -lpowrprof -lwtsapi32 -ldxgi -lole32 -static
 
   sanitizers:
     name: Sanitizers (Linux, ASan + UBSan)

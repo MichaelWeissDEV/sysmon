@@ -18,9 +18,12 @@ temperature_monitor
 network_monitor
 net_connections_monitor
 process_monitor
+battery_monitor
 config
 tui
 text_renderer
+json_renderer
+terminal
 utils
 stats
 ```

@@ -22,3 +22,25 @@ TEST(SystemMonitorTest, UptimeNonNegative) {
     auto stats = mon.read();
     EXPECT_GE(stats.uptime_seconds, 0.0);
 }
+// ---------------------------------------------------------------------------
+// /etc/os-release parsing
+// ---------------------------------------------------------------------------
+
+TEST(SystemMonitorTest, PrettyNameWinsInOsRelease) {
+    const std::string content =
+        "NAME=\"Ubuntu\"\n"
+        "VERSION=\"24.04 LTS (Noble Numbat)\"\n"
+        "PRETTY_NAME=\"Ubuntu 24.04 LTS\"\n"
+        "ID=ubuntu\n";
+    EXPECT_EQ(SystemMonitor::parse_os_release(content), "Ubuntu 24.04 LTS");
+}
+
+TEST(SystemMonitorTest, FallsBackToNameAndVersion) {
+    const std::string content = "NAME=Arch Linux\nVERSION=rolling\n";
+    EXPECT_EQ(SystemMonitor::parse_os_release(content), "Arch Linux rolling");
+}
+
+TEST(SystemMonitorTest, EmptyOrGarbageOsReleaseYieldsEmptyString) {
+    EXPECT_TRUE(SystemMonitor::parse_os_release("").empty());
+    EXPECT_TRUE(SystemMonitor::parse_os_release("no equals signs here\n").empty());
+}

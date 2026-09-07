@@ -18,6 +18,7 @@
  * - Linux AMD (AMDGPU driver via /sys/class/drm/)
  * - Linux NVIDIA (nouveau / nvidia driver via /sys/class/drm/ and sysfs)
  * - Linux Intel (i915 via /sys/class/drm/)
+ * - Windows via DXGI (adapter identity and video memory)
  */
 class GpuMonitor {
 public:
@@ -34,6 +35,7 @@ private:
     std::vector<GpuStats> read_amd_linux();
     std::vector<GpuStats> read_nvidia_linux();
     std::vector<GpuStats> read_intel_linux();
+    std::vector<GpuStats> read_windows();
 };
 
 #endif // SYSMON_GPU_MONITOR_HPP

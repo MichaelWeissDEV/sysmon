@@ -8,6 +8,11 @@
 #include <chrono>
 #include <filesystem>
 
+#if defined(SYSMON_WINDOWS)
+#  include <windows.h>
+#  include <winioctl.h>
+#endif
+
 #if defined(SYSMON_MACOS)
 #  include <CoreFoundation/CoreFoundation.h>
 #  include <IOKit/IOKitLib.h>
@@ -23,6 +28,8 @@ std::vector<DiskIOStats> DiskIOMonitor::read() {
     return read_linux();
 #elif defined(SYSMON_MACOS)
     return read_macos();
+#elif defined(SYSMON_WINDOWS)
+    return read_windows();
 #else
     return {};
 #endif
@@ -48,56 +55,86 @@ std::vector<DiskIOStats> DiskIOMonitor::read_linux() {
         parts.erase(std::remove_if(parts.begin(), parts.end(),
                     [](const std::string& s) { return s.empty(); }), parts.end());
 
+        // The first 10 stat fields are guaranteed; the timing and busy fields
+        // that follow are not published by every device or kernel version, so
+        // require only the base set and treat the rest as optional.
         if (parts.size() < 10) continue;
 
         std::string dev = parts[2];
         if (!is_physical_device(dev)) continue;
 
-        uint64_t reads_completed  = 0;
-        uint64_t sectors_read     = 0;
-        uint64_t writes_completed = 0;
-        uint64_t sectors_written  = 0;
+        auto field = [&parts](size_t i) -> uint64_t {
+            if (i >= parts.size()) return 0;
+            const auto v = utils::to_int(parts[i]);
+            return (v.has_value() && *v >= 0) ? static_cast<uint64_t>(*v) : 0ULL;
+        };
 
-        try {
-            reads_completed  = std::stoull(parts[3]);
-            sectors_read     = std::stoull(parts[5]);
-            writes_completed = std::stoull(parts[7]);
-            sectors_written  = std::stoull(parts[9]);
-        } catch (...) { continue; }
+        const uint64_t reads_completed  = field(3);
+        const uint64_t sectors_read     = field(5);
+        const uint64_t writes_completed = field(7);
+        const uint64_t sectors_written  = field(9);
+        const bool     have_timing      = parts.size() >= 14;
+        const uint64_t read_time_ms     = have_timing ? field(6)  : 0;
+        const uint64_t write_time_ms    = have_timing ? field(10) : 0;
+        const uint64_t busy_time_ms     = have_timing ? field(12) : 0;
 
         constexpr uint64_t sector_size = 512;
         uint64_t read_bytes    = sectors_read    * sector_size;
         uint64_t written_bytes = sectors_written * sector_size;
 
         DiskIOStats ios;
-        ios.device = dev;
+        ios.device            = dev;
+        ios.read_bytes_total  = read_bytes;
+        ios.write_bytes_total = written_bytes;
+        ios.read_ops_total    = reads_completed;
+        ios.write_ops_total   = writes_completed;
 
         auto it = previous_.find(dev);
         if (it != previous_.end()) {
-            double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
+            const double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
             if (dt > 0.0) {
-                if (read_bytes >= it->second.read_bytes) {
-                    ios.read_bytes_per_sec = static_cast<double>(read_bytes - it->second.read_bytes) / dt;
+                auto rate = [dt](uint64_t current, uint64_t before) {
+                    return current >= before ? static_cast<double>(current - before) / dt : 0.0;
+                };
+                ios.read_bytes_per_sec  = rate(read_bytes,      it->second.read_bytes);
+                ios.write_bytes_per_sec = rate(written_bytes,   it->second.write_bytes);
+                ios.read_ops_per_sec    = rate(reads_completed, it->second.read_ios);
+                ios.write_ops_per_sec   = rate(writes_completed, it->second.write_ios);
+
+                // Utilisation is the fraction of wall-clock time the device
+                // had at least one request in flight.
+                if (have_timing && busy_time_ms >= it->second.busy_time_ms) {
+                    const double busy_s = static_cast<double>(busy_time_ms - it->second.busy_time_ms) / 1000.0;
+                    ios.util_percent = std::min(100.0, busy_s / dt * 100.0);
                 }
-                if (written_bytes >= it->second.write_bytes) {
-                    ios.write_bytes_per_sec = static_cast<double>(written_bytes - it->second.write_bytes) / dt;
+                // Average service time per completed request in this interval.
+                const uint64_t d_reads = reads_completed >= it->second.read_ios
+                                       ? reads_completed - it->second.read_ios : 0;
+                if (have_timing && d_reads > 0 && read_time_ms >= it->second.read_time_ns) {
+                    ios.avg_read_latency_ms =
+                        static_cast<double>(read_time_ms - it->second.read_time_ns) /
+                        static_cast<double>(d_reads);
                 }
-                if (reads_completed >= it->second.read_ios) {
-                    ios.read_ops_per_sec = static_cast<double>(reads_completed - it->second.read_ios) / dt;
-                }
-                if (writes_completed >= it->second.write_ios) {
-                    ios.write_ops_per_sec = static_cast<double>(writes_completed - it->second.write_ios) / dt;
+                const uint64_t d_writes = writes_completed >= it->second.write_ios
+                                        ? writes_completed - it->second.write_ios : 0;
+                if (have_timing && d_writes > 0 && write_time_ms >= it->second.write_time_ns) {
+                    ios.avg_write_latency_ms =
+                        static_cast<double>(write_time_ms - it->second.write_time_ns) /
+                        static_cast<double>(d_writes);
                 }
             }
         }
 
         DeviceSnapshot snap;
-        snap.read_bytes  = read_bytes;
-        snap.write_bytes = written_bytes;
-        snap.read_ios    = reads_completed;
-        snap.write_ios   = writes_completed;
-        snap.timestamp   = now;
-        previous_[dev]   = snap;
+        snap.read_bytes    = read_bytes;
+        snap.write_bytes   = written_bytes;
+        snap.read_ios      = reads_completed;
+        snap.write_ios     = writes_completed;
+        snap.read_time_ns  = read_time_ms;
+        snap.write_time_ns = write_time_ms;
+        snap.busy_time_ms  = busy_time_ms;
+        snap.timestamp     = now;
+        previous_[dev]     = snap;
 
         result.push_back(ios);
     }
@@ -190,7 +227,11 @@ std::vector<DiskIOStats> DiskIOMonitor::read_macos() {
                 write_ops   = get_num(CFSTR("Operations (Write)"));
 
                 DiskIOStats ios;
-                ios.device = bsd_name;
+                ios.device            = bsd_name;
+                ios.read_bytes_total  = read_bytes;
+                ios.write_bytes_total = write_bytes;
+                ios.read_ops_total    = read_ops;
+                ios.write_ops_total   = write_ops;
 
                 auto it = previous_.find(bsd_name);
                 if (it != previous_.end()) {
@@ -240,4 +281,112 @@ std::vector<DiskIOStats> DiskIOMonitor::read_macos() {
 
 #else
 std::vector<DiskIOStats> DiskIOMonitor::read_macos() { return {}; }
+#endif
+
+// ---------------------------------------------------------------------------
+// Windows: IOCTL_DISK_PERFORMANCE per physical drive
+// ---------------------------------------------------------------------------
+
+#if defined(SYSMON_WINDOWS)
+
+std::vector<DiskIOStats> DiskIOMonitor::read_windows() {
+    std::vector<DiskIOStats> result;
+    const auto now = std::chrono::steady_clock::now();
+
+    // Physical drive numbers are dense in practice; stop after the first gap
+    // beyond a small tolerance so a removed drive does not end the scan early.
+    int misses = 0;
+    for (int index = 0; index < 32 && misses < 4; ++index) {
+        const std::string path = "\\\\.\\PhysicalDrive" + std::to_string(index);
+
+        // Zero desired access opens the device for metadata only, which is
+        // what IOCTL_DISK_PERFORMANCE needs and does not require elevation.
+        HANDLE handle = CreateFileA(path.c_str(), 0,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                    OPEN_EXISTING, 0, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            ++misses;
+            continue;
+        }
+        misses = 0;
+
+        DISK_PERFORMANCE perf{};
+        DWORD returned = 0;
+        const BOOL ok = DeviceIoControl(handle, IOCTL_DISK_PERFORMANCE, nullptr, 0,
+                                        &perf, sizeof(perf), &returned, nullptr);
+        CloseHandle(handle);
+        if (!ok) continue;
+
+        const std::string dev = "PhysicalDrive" + std::to_string(index);
+        const auto read_bytes  = static_cast<uint64_t>(perf.BytesRead.QuadPart);
+        const auto write_bytes = static_cast<uint64_t>(perf.BytesWritten.QuadPart);
+        const auto read_ops    = static_cast<uint64_t>(perf.ReadCount);
+        const auto write_ops   = static_cast<uint64_t>(perf.WriteCount);
+        // Times are in 100 ns units.
+        const auto read_time   = static_cast<uint64_t>(perf.ReadTime.QuadPart);
+        const auto write_time  = static_cast<uint64_t>(perf.WriteTime.QuadPart);
+        const auto idle_time   = static_cast<uint64_t>(perf.IdleTime.QuadPart);
+
+        DiskIOStats ios;
+        ios.device            = dev;
+        ios.read_bytes_total  = read_bytes;
+        ios.write_bytes_total = write_bytes;
+        ios.read_ops_total    = read_ops;
+        ios.write_ops_total   = write_ops;
+        ios.queue_depth       = static_cast<double>(perf.QueueDepth);
+
+        auto it = previous_.find(dev);
+        if (it != previous_.end()) {
+            const double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
+            if (dt > 0.0) {
+                auto rate = [dt](uint64_t current, uint64_t before) {
+                    return current >= before ? static_cast<double>(current - before) / dt : 0.0;
+                };
+                ios.read_bytes_per_sec  = rate(read_bytes,  it->second.read_bytes);
+                ios.write_bytes_per_sec = rate(write_bytes, it->second.write_bytes);
+                ios.read_ops_per_sec    = rate(read_ops,    it->second.read_ios);
+                ios.write_ops_per_sec   = rate(write_ops,   it->second.write_ios);
+
+                const uint64_t d_reads = read_ops >= it->second.read_ios
+                                       ? read_ops - it->second.read_ios : 0;
+                if (d_reads > 0 && read_time >= it->second.read_time_ns) {
+                    ios.avg_read_latency_ms =
+                        static_cast<double>(read_time - it->second.read_time_ns) /
+                        static_cast<double>(d_reads) / 10000.0;
+                }
+                const uint64_t d_writes = write_ops >= it->second.write_ios
+                                        ? write_ops - it->second.write_ios : 0;
+                if (d_writes > 0 && write_time >= it->second.write_time_ns) {
+                    ios.avg_write_latency_ms =
+                        static_cast<double>(write_time - it->second.write_time_ns) /
+                        static_cast<double>(d_writes) / 10000.0;
+                }
+                // Busy fraction is whatever was not idle during the interval.
+                if (idle_time >= it->second.busy_time_ms) {
+                    const double idle_s =
+                        static_cast<double>(idle_time - it->second.busy_time_ms) / 1e7;
+                    ios.util_percent = std::max(0.0, std::min(100.0, (1.0 - idle_s / dt) * 100.0));
+                }
+            }
+        }
+
+        DeviceSnapshot snap;
+        snap.read_bytes    = read_bytes;
+        snap.write_bytes   = write_bytes;
+        snap.read_ios      = read_ops;
+        snap.write_ios     = write_ops;
+        snap.read_time_ns  = read_time;
+        snap.write_time_ns = write_time;
+        snap.busy_time_ms  = idle_time;
+        snap.timestamp     = now;
+        previous_[dev]     = snap;
+
+        result.push_back(std::move(ios));
+    }
+
+    return result;
+}
+
+#else
+std::vector<DiskIOStats> DiskIOMonitor::read_windows() { return {}; }
 #endif

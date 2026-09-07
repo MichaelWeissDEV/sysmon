@@ -21,6 +21,7 @@ set(SYSMON_LIB_SOURCES
     src/memory_monitor.cpp
     src/gpu_monitor.cpp
     src/load_monitor.cpp
+    src/battery_monitor.cpp
     src/disk_monitor.cpp
     src/disk_io_monitor.cpp
     src/temperature_monitor.cpp
@@ -30,7 +31,9 @@ set(SYSMON_LIB_SOURCES
     src/config.cpp
     src/tui.cpp
     src/text_renderer.cpp
+    src/json_renderer.cpp
     src/utils.cpp
+    src/terminal.cpp
 )
 
 set(SYSMON_HEADERS
@@ -42,6 +45,7 @@ set(SYSMON_HEADERS
     include/sysmon/memory_monitor.hpp
     include/sysmon/gpu_monitor.hpp
     include/sysmon/load_monitor.hpp
+    include/sysmon/battery_monitor.hpp
     include/sysmon/disk_monitor.hpp
     include/sysmon/disk_io_monitor.hpp
     include/sysmon/temperature_monitor.hpp
@@ -50,7 +54,9 @@ set(SYSMON_HEADERS
     include/sysmon/process_monitor.hpp
     include/sysmon/tui.hpp
     include/sysmon/text_renderer.hpp
+    include/sysmon/json_renderer.hpp
     include/sysmon/utils.hpp
+    include/sysmon/terminal.hpp
 )
 
 # ---------------------------------------------------------------------------
@@ -89,6 +95,31 @@ if(APPLE)
     target_link_libraries(sysmon_lib PRIVATE
         ${IOKIT_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
+    )
+elseif(WIN32)
+    # iphlpapi: interface counters, TCP/UDP tables, adapter addresses
+    # psapi:    per-process memory counters
+    # powrprof: CallNtPowerInformation for CPU frequency
+    # wtsapi32: logged-in session enumeration
+    # dxgi:     GPU adapter identity and video memory
+    target_link_libraries(sysmon_lib PRIVATE
+        iphlpapi
+        psapi
+        ws2_32
+        powrprof
+        wtsapi32
+        dxgi
+        ole32
+    )
+
+    # Ask for a modern Windows SDK surface and keep <windows.h> from defining
+    # min/max macros that collide with the standard library.
+    target_compile_definitions(sysmon_lib PUBLIC
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0601
+        UNICODE
+        _UNICODE
     )
 endif()
 

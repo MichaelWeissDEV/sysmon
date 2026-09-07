@@ -16,6 +16,7 @@
 #  include <mach/processor_info.h>
 #  include <mach/mach_host.h>
 #  include <notify.h>
+#  include <libkern/OSThermalNotification.h>
 #endif
 
 #if defined(SYSMON_WINDOWS)
@@ -127,7 +128,7 @@ std::string thermal_pressure_level() {
     notify_cancel(token);
     if (rc != NOTIFY_STATUS_OK) return "";
 
-    switch (state) {
+    switch (static_cast<OSThermalPressureLevel>(state)) {
         case kOSThermalPressureLevelNominal:  return "Nominal";
         case kOSThermalPressureLevelModerate: return "Moderate";
         case kOSThermalPressureLevelHeavy:    return "Heavy";

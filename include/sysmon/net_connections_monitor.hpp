@@ -18,6 +18,8 @@
  * On Linux: reads /proc/net/tcp, /proc/net/tcp6, /proc/net/udp, /proc/net/udp6
  *           and matches inodes to processes via /proc/<pid>/fd/.
  * On macOS: parses netstat output.
+ * On Windows: GetExtendedTcpTable / GetExtendedUdpTable, which already carry
+ *             the owning PID.
  */
 class NetConnectionsMonitor {
 public:
@@ -31,6 +33,14 @@ public:
      */
     std::vector<NetConnectionStats> read(bool include_listen = false,
                                           unsigned int limit = 100);
+
+    /**
+     * @brief Summarise a connection list into per-state counters.
+     *
+     * The socket census belongs to whichever component already walked the
+     * socket tables, which is this one.
+     */
+    static void summarize(const std::vector<NetConnectionStats>& conns, NetGlobalStats& out);
 
     // Pure parsers for `netstat -anv -p tcp` / `netstat -anv -p udp` output.
     // These are platform-independent so they can be exercised with fixtures.
@@ -56,6 +66,7 @@ private:
 
     std::vector<NetConnectionStats> read_linux(bool include_listen, unsigned int limit);
     std::vector<NetConnectionStats> read_macos(bool include_listen, unsigned int limit);
+    std::vector<NetConnectionStats> read_windows(bool include_listen, unsigned int limit);
 };
 
 #endif // SYSMON_NET_CONNECTIONS_MONITOR_HPP

@@ -11,10 +11,11 @@
 #define SYSMON_CONFIG_HPP
 
 #include "sysmon/stats.hpp"
+#include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
-#include <map>
-#include <set>
 
 /**
  * @brief All configurable sysmon settings.
@@ -46,6 +47,9 @@ struct Config {
     bool show_gpu_memory{true};
     bool show_gpu_per_core{false};  ///< Reserved for future use
 
+    // Battery / power
+    bool show_battery{true};
+
     // Temperature
     bool show_temperature{true};
     bool show_temperature_per_sensor{true};
@@ -60,6 +64,8 @@ struct Config {
     bool show_network{true};
     bool show_network_per_iface{true};
     bool show_network_sparkline{true};
+    bool show_network_details{false};  ///< MAC, MTU, totals, errors per interface
+    bool show_network_inactive{false}; ///< Interfaces that never carried traffic
     std::set<std::string> excluded_interfaces; ///< e.g. "lo", "lo0"
 
     // Connections
@@ -72,6 +78,7 @@ struct Config {
     int  proc_limit{20};            ///< Max processes to show
     bool show_proc_threads{true};
     bool show_proc_network{false};  ///< Per-process rx/tx (expensive)
+    ProcSort proc_sort{ProcSort::Cpu}; ///< Process table ordering
 
     // ------------------------------------------------------------------
     // [tui]
@@ -108,6 +115,12 @@ struct Config {
 
     /** @brief Build DisplayFlags from current config settings. */
     struct DisplayFlags to_display_flags() const;
+
+    /** @brief Parse a sort name ("cpu", "mem", "pid", "name", "time"). */
+    static std::optional<ProcSort> parse_sort(const std::string& name);
+
+    /** @brief Name of a sort order, as accepted by parse_sort(). */
+    static std::string sort_name(ProcSort sort);
 };
 
 #endif // SYSMON_CONFIG_HPP

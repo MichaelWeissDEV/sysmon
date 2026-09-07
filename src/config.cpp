@@ -1,6 +1,7 @@
 #include "sysmon/config.hpp"
 #include "sysmon/stats.hpp"
 #include "sysmon/utils.hpp"
+#include "sysmon/platform.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -19,7 +20,16 @@ namespace fs = std::filesystem;
 std::string Config::default_config_path() {
     // --config PATH always takes precedence (handled in main); this is the
     // default location when no explicit path is given.
-    //
+#if defined(SYSMON_WINDOWS)
+    // Windows convention: %APPDATA%\\sysmon\\sysmon.conf
+    if (const char* appdata = std::getenv("APPDATA")) {
+        if (*appdata != '\0') return std::string(appdata) + "\\sysmon\\sysmon.conf";
+    }
+    if (const char* profile = std::getenv("USERPROFILE")) {
+        if (*profile != '\0') return std::string(profile) + "\\sysmon.conf";
+    }
+    return "sysmon.conf";
+#else
     // Precedence:
     //   1. $XDG_CONFIG_HOME/sysmon/sysmon.conf      (when XDG_CONFIG_HOME is set)
     //   2. $HOME/.config/sysmon/sysmon.conf         (legacy fallback)
@@ -31,6 +41,28 @@ std::string Config::default_config_path() {
     const char* home = std::getenv("HOME");
     if (!home || *home == '\0') return "/tmp/sysmon/sysmon.conf";
     return std::string(home) + "/.config/sysmon/sysmon.conf";
+#endif
+}
+
+std::optional<ProcSort> Config::parse_sort(const std::string& name) {
+    const std::string lower = utils::to_lower(utils::trim(name));
+    if (lower == "cpu")                      return ProcSort::Cpu;
+    if (lower == "mem" || lower == "memory") return ProcSort::Memory;
+    if (lower == "pid")                      return ProcSort::Pid;
+    if (lower == "name")                     return ProcSort::Name;
+    if (lower == "time")                     return ProcSort::Time;
+    return std::nullopt;
+}
+
+std::string Config::sort_name(ProcSort sort) {
+    switch (sort) {
+        case ProcSort::Memory: return "mem";
+        case ProcSort::Pid:    return "pid";
+        case ProcSort::Name:   return "name";
+        case ProcSort::Time:   return "time";
+        case ProcSort::Cpu:
+        default:               return "cpu";
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +153,7 @@ Config Config::load_from(const std::string& path) {
             else if (key == "show_memory_cache")     cfg.show_memory_cache = parse_bool(val);
             else if (key == "show_gpu")              cfg.show_gpu = parse_bool(val);
             else if (key == "show_gpu_memory")       cfg.show_gpu_memory = parse_bool(val);
+            else if (key == "show_battery")          cfg.show_battery = parse_bool(val);
             else if (key == "show_temperature")      cfg.show_temperature = parse_bool(val);
             else if (key == "show_temperature_per_sensor") cfg.show_temperature_per_sensor = parse_bool(val);
             else if (key == "show_disk")             cfg.show_disk = parse_bool(val);
@@ -128,6 +161,8 @@ Config Config::load_from(const std::string& path) {
             else if (key == "show_network")          cfg.show_network = parse_bool(val);
             else if (key == "show_network_per_iface") cfg.show_network_per_iface = parse_bool(val);
             else if (key == "show_network_sparkline") cfg.show_network_sparkline = parse_bool(val);
+            else if (key == "show_network_details")  cfg.show_network_details = parse_bool(val);
+            else if (key == "show_network_inactive") cfg.show_network_inactive = parse_bool(val);
             else if (key == "show_connections")      cfg.show_connections = parse_bool(val);
             else if (key == "connections_limit") {
                 if (auto v = parse_int(val)) cfg.connections_limit = v.value();
@@ -137,6 +172,9 @@ Config Config::load_from(const std::string& path) {
                 if (auto v = parse_int(val)) cfg.proc_limit = v.value();
             } else if (key == "show_proc_threads")     cfg.show_proc_threads = parse_bool(val);
             else if (key == "show_proc_network")     cfg.show_proc_network = parse_bool(val);
+            else if (key == "proc_sort") {
+                if (auto v = parse_sort(val)) cfg.proc_sort = v.value();
+            }
         }
         // ---- [tui] ----
         else if (section == "tui") {
@@ -214,6 +252,8 @@ void Config::save_to(const std::string& path) const {
       << "# GPU\n"
       << "show_gpu = " << bool_str(show_gpu) << "\n"
       << "show_gpu_memory = " << bool_str(show_gpu_memory) << "\n\n"
+      << "# Battery / power\n"
+      << "show_battery = " << bool_str(show_battery) << "\n\n"
       << "# Temperature\n"
       << "show_temperature = " << bool_str(show_temperature) << "\n"
       << "show_temperature_per_sensor = " << bool_str(show_temperature_per_sensor) << "\n\n"
@@ -223,7 +263,9 @@ void Config::save_to(const std::string& path) const {
       << "# Network\n"
       << "show_network = " << bool_str(show_network) << "\n"
       << "show_network_per_iface = " << bool_str(show_network_per_iface) << "\n"
-      << "show_network_sparkline = " << bool_str(show_network_sparkline) << "\n\n"
+      << "show_network_sparkline = " << bool_str(show_network_sparkline) << "\n"
+      << "show_network_details = " << bool_str(show_network_details) << "\n"
+      << "show_network_inactive = " << bool_str(show_network_inactive) << "\n\n"
       << "# Connections\n"
       << "show_connections = " << bool_str(show_connections) << "\n"
       << "connections_limit = " << connections_limit << "\n"
@@ -232,7 +274,9 @@ void Config::save_to(const std::string& path) const {
       << "show_processes = " << bool_str(show_processes) << "\n"
       << "proc_limit = " << proc_limit << "\n"
       << "show_proc_threads = " << bool_str(show_proc_threads) << "\n"
-      << "show_proc_network = " << bool_str(show_proc_network) << "\n\n";
+      << "show_proc_network = " << bool_str(show_proc_network) << "\n"
+      << "# Sort order: cpu, mem, pid, name, time\n"
+      << "proc_sort = " << sort_name(proc_sort) << "\n\n";
 
     f << "[tui]\n"
       << "use_unicode = " << bool_str(tui_use_unicode) << "\n"
@@ -285,7 +329,9 @@ std::string Config::to_string() const {
         << "  show_disk_io             = " << bool_str(show_disk_io) << "\n"
         << "  show_network             = " << bool_str(show_network) << "\n"
         << "  show_connections         = " << bool_str(show_connections) << "\n"
+        << "  show_battery             = " << bool_str(show_battery) << "\n"
         << "  show_processes           = " << bool_str(show_processes) << "\n"
+        << "  proc_sort                = " << sort_name(proc_sort) << "\n"
         << "  proc_limit               = " << proc_limit << "\n"
         << "  connections_limit        = " << connections_limit << "\n"
         << "}\n";
@@ -305,6 +351,7 @@ DisplayFlags Config::to_display_flags() const {
     f.swap                  = show_swap;
     f.gpu                   = show_gpu;
     f.gpu_memory            = show_gpu_memory;
+    f.battery               = show_battery;
     f.temperature           = show_temperature;
     f.temperature_per_sensor = show_temperature_per_sensor;
     f.disk                  = show_disk;

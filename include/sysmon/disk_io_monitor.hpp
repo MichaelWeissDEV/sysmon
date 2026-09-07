@@ -16,8 +16,12 @@
 /**
  * @brief Measures disk read/write throughput per block device.
  *
- * On Linux, reads /proc/diskstats and computes delta over time.
- * On macOS, uses IOKit disk statistics.
+ * - Linux:   /proc/diskstats
+ * - macOS:   IOKit IOBlockStorageDriver statistics
+ * - Windows: IOCTL_DISK_PERFORMANCE on each \\.\PhysicalDriveN
+ *
+ * All figures are deltas between two successive calls, so the first call
+ * reports zero rates rather than an average since boot.
  */
 class DiskIOMonitor {
 public:
@@ -37,6 +41,9 @@ private:
         uint64_t write_ios{0};
         uint64_t read_bytes{0};
         uint64_t write_bytes{0};
+        uint64_t read_time_ns{0};    ///< Cumulative time spent reading
+        uint64_t write_time_ns{0};   ///< Cumulative time spent writing
+        uint64_t busy_time_ms{0};    ///< Cumulative device-busy time
         std::chrono::steady_clock::time_point timestamp;
     };
 
@@ -44,6 +51,7 @@ private:
 
     std::vector<DiskIOStats> read_linux();
     std::vector<DiskIOStats> read_macos();
+    std::vector<DiskIOStats> read_windows();
 
     bool is_physical_device(const std::string& dev);
 };

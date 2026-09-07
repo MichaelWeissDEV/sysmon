@@ -16,7 +16,7 @@
 #  include <io.h>
 #  include <cstdio>
 #else
-#  include <fcntl.h>
+#  include <poll.h>
 #  include <sys/ioctl.h>
 #  include <termios.h>
 #  include <unistd.h>
@@ -40,7 +40,6 @@ Size  g_last_size{};
 #else
 
 struct termios g_saved_tio{};
-int  g_saved_stdin_flags = 0;
 bool g_signal_installed  = false;
 
 void winch_handler(int) {
@@ -144,14 +143,20 @@ bool enable_raw_input() {
 #else
     if (tcgetattr(STDIN_FILENO, &g_saved_tio) != 0) return false;
 
+    // VMIN=0/VTIME=0 makes read() return immediately when no key is pending,
+    // which is all the non-blocking behaviour that is needed here.
+    //
+    // Deliberately NOT setting O_NONBLOCK on stdin: in a terminal, stdin and
+    // stdout are the same open file description, so that flag makes *stdout*
+    // non-blocking too.  Once the terminal's output buffer filled, std::cout's
+    // write would fail with EAGAIN, the stream would latch its error state, and
+    // every later frame would be discarded — the dashboard would go blank and
+    // never come back.
     struct termios raw = g_saved_tio;
     raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
     raw.c_cc[VMIN]  = 0;
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) return false;
-
-    g_saved_stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, g_saved_stdin_flags | O_NONBLOCK);
 #endif
 
     g_raw_active = true;
@@ -168,7 +173,6 @@ void disable_raw_input() {
     }
 #else
     tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_tio);
-    fcntl(STDIN_FILENO, F_SETFL, g_saved_stdin_flags);
 #endif
 
     g_raw_active = false;
@@ -188,6 +192,14 @@ int read_key() {
     }
     return ch;
 #else
+    // poll() answers "is a key waiting?" without touching the file status
+    // flags that stdout shares with stdin.
+    struct pollfd pfd{};
+    pfd.fd     = STDIN_FILENO;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 0) <= 0) return -1;
+    if ((pfd.revents & POLLIN) == 0) return -1;
+
     char ch = 0;
     const ssize_t n = ::read(STDIN_FILENO, &ch, 1);
     if (n <= 0) return -1;

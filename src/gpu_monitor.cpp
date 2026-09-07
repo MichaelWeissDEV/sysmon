@@ -12,6 +12,11 @@
 #  include <sys/sysctl.h>
 #endif
 
+#if defined(SYSMON_WINDOWS)
+#  include <windows.h>
+#  include <dxgi1_4.h>
+#endif
+
 namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +36,9 @@ std::vector<GpuStats> GpuMonitor::read() {
     result.insert(result.end(), amd.begin(),  amd.end());
     result.insert(result.end(), nvid.begin(), nvid.end());
     result.insert(result.end(), intl.begin(), intl.end());
+#elif defined(SYSMON_WINDOWS)
+    auto win = read_windows();
+    result.insert(result.end(), win.begin(), win.end());
 #endif
 
     return result;
@@ -273,4 +281,108 @@ std::vector<GpuStats> GpuMonitor::read_intel_linux() {
 std::vector<GpuStats> GpuMonitor::read_amd_linux()    { return {}; }
 std::vector<GpuStats> GpuMonitor::read_nvidia_linux() { return {}; }
 std::vector<GpuStats> GpuMonitor::read_intel_linux()  { return {}; }
+#endif
+
+// ---------------------------------------------------------------------------
+// Windows: DXGI adapter enumeration
+// ---------------------------------------------------------------------------
+
+#if defined(SYSMON_WINDOWS)
+
+std::vector<GpuStats> GpuMonitor::read_windows() {
+    std::vector<GpuStats> result;
+
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+                                  reinterpret_cast<void**>(&factory))) || factory == nullptr) {
+        return result;
+    }
+
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT index = 0; factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
+        if (adapter == nullptr) continue;
+
+        DXGI_ADAPTER_DESC1 desc{};
+        if (FAILED(adapter->GetDesc1(&desc))) {
+            adapter->Release();
+            adapter = nullptr;
+            continue;
+        }
+
+        // Skip the Microsoft Basic Render Driver, which is not real hardware.
+        if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+            adapter->Release();
+            adapter = nullptr;
+            continue;
+        }
+
+        GpuStats gs;
+        {
+            const int needed = WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1,
+                                                   nullptr, 0, nullptr, nullptr);
+            if (needed > 1) {
+                std::string name(static_cast<size_t>(needed - 1), '\0');
+                WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1,
+                                    name.data(), needed, nullptr, nullptr);
+                gs.name = name;
+            }
+        }
+
+        switch (desc.VendorId) {
+            case 0x10DE: gs.vendor = "NVIDIA"; break;
+            case 0x1002:
+            case 0x1022: gs.vendor = "AMD";    break;
+            case 0x8086: gs.vendor = "Intel";  break;
+            case 0x1414: gs.vendor = "Microsoft"; break;
+            default:     gs.vendor = "Unknown"; break;
+        }
+
+        if (desc.DedicatedVideoMemory > 0) {
+            gs.memory_total_bytes = desc.DedicatedVideoMemory;
+            gs.memory_type        = "Dedicated";
+        } else if (desc.SharedSystemMemory > 0) {
+            gs.memory_total_bytes = desc.SharedSystemMemory;
+            gs.memory_type        = "Shared";
+        }
+
+        // IDXGIAdapter3 reports live video-memory usage; older drivers may not
+        // support it, in which case usage stays unreported rather than guessed.
+        IDXGIAdapter3* adapter3 = nullptr;
+        if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3),
+                                              reinterpret_cast<void**>(&adapter3))) &&
+            adapter3 != nullptr) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+            const auto segment = (desc.DedicatedVideoMemory > 0)
+                               ? DXGI_MEMORY_SEGMENT_GROUP_LOCAL
+                               : DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL;
+            if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, segment, &info))) {
+                gs.memory_used_bytes = info.CurrentUsage;
+                if (info.Budget > 0 && !gs.memory_total_bytes.has_value()) {
+                    gs.memory_total_bytes = info.Budget;
+                }
+                if (gs.memory_total_bytes.has_value() && *gs.memory_total_bytes > 0) {
+                    gs.memory_free_bytes = *gs.memory_total_bytes > info.CurrentUsage
+                                         ? *gs.memory_total_bytes - info.CurrentUsage : 0;
+                    gs.memory_usage_percent =
+                        static_cast<double>(info.CurrentUsage) /
+                        static_cast<double>(*gs.memory_total_bytes) * 100.0;
+                }
+            }
+            adapter3->Release();
+        }
+
+        // Engine utilisation needs either a vendor SDK or the GPU performance
+        // counters; neither is available unprivileged, so it stays N/A.
+        result.push_back(std::move(gs));
+
+        adapter->Release();
+        adapter = nullptr;
+    }
+
+    factory->Release();
+    return result;
+}
+
+#else
+std::vector<GpuStats> GpuMonitor::read_windows() { return {}; }
 #endif

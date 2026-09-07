@@ -2,6 +2,7 @@
 #include "sysmon/utils.hpp"
 #include "sysmon/platform.hpp"
 
+#include <cstring>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -13,6 +14,15 @@
 #include <cstdio>
 #include <memory>
 #include <array>
+
+#if defined(SYSMON_WINDOWS)
+#  include <windows.h>
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  include <iphlpapi.h>
+#  include <tcpestats.h>
+#  include <tlhelp32.h>
+#endif
 
 #if defined(SYSMON_POSIX)
 #  include <arpa/inet.h>
@@ -131,10 +141,27 @@ std::vector<NetConnectionStats> NetConnectionsMonitor::read(bool include_listen,
     return read_linux(include_listen, limit);
 #elif defined(SYSMON_MACOS)
     return read_macos(include_listen, limit);
+#elif defined(SYSMON_WINDOWS)
+    return read_windows(include_listen, limit);
 #else
     (void)include_listen; (void)limit;
     return {};
 #endif
+}
+
+void NetConnectionsMonitor::summarize(const std::vector<NetConnectionStats>& conns,
+                                      NetGlobalStats& out) {
+    for (const auto& c : conns) {
+        if (utils::starts_with(c.protocol, "udp") || utils::starts_with(c.protocol, "UDP")) {
+            ++out.udp_sockets;
+            continue;
+        }
+        if      (c.state == "ESTABLISHED") ++out.tcp_established;
+        else if (c.state == "LISTEN")      ++out.tcp_listen;
+        else if (c.state == "TIME_WAIT")   ++out.tcp_time_wait;
+        else                               ++out.tcp_other;
+    }
+    out.total_connections = static_cast<unsigned int>(conns.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -420,4 +447,184 @@ std::vector<NetConnectionStats> NetConnectionsMonitor::parse_macos_netstat_udp(c
 
 #else
 std::vector<NetConnectionStats> NetConnectionsMonitor::read_macos(bool, unsigned int) { return {}; }
+#endif
+
+// ---------------------------------------------------------------------------
+// Windows implementation
+// ---------------------------------------------------------------------------
+
+#if defined(SYSMON_WINDOWS)
+
+namespace {
+
+/// Map the MIB TCP state enum onto the names the rest of sysmon uses.
+std::string mib_tcp_state_name(DWORD state) {
+    switch (state) {
+        case MIB_TCP_STATE_CLOSED:     return "CLOSED";
+        case MIB_TCP_STATE_LISTEN:     return "LISTEN";
+        case MIB_TCP_STATE_SYN_SENT:   return "SYN_SENT";
+        case MIB_TCP_STATE_SYN_RCVD:   return "SYN_RECV";
+        case MIB_TCP_STATE_ESTAB:      return "ESTABLISHED";
+        case MIB_TCP_STATE_FIN_WAIT1:  return "FIN_WAIT1";
+        case MIB_TCP_STATE_FIN_WAIT2:  return "FIN_WAIT2";
+        case MIB_TCP_STATE_CLOSE_WAIT: return "CLOSE_WAIT";
+        case MIB_TCP_STATE_CLOSING:    return "CLOSING";
+        case MIB_TCP_STATE_LAST_ACK:   return "LAST_ACK";
+        case MIB_TCP_STATE_TIME_WAIT:  return "TIME_WAIT";
+        case MIB_TCP_STATE_DELETE_TCB: return "DELETE_TCB";
+        default:                       return "UNKNOWN";
+    }
+}
+
+/// Build a pid -> executable name table from a single Toolhelp snapshot.
+std::map<int, std::string> snapshot_process_names() {
+    std::map<int, std::string> names;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return names;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            const int needed = WideCharToMultiByte(CP_UTF8, 0, entry.szExeFile, -1,
+                                                   nullptr, 0, nullptr, nullptr);
+            if (needed > 1) {
+                std::string name(static_cast<size_t>(needed - 1), '\0');
+                WideCharToMultiByte(CP_UTF8, 0, entry.szExeFile, -1,
+                                    name.data(), needed, nullptr, nullptr);
+                names[static_cast<int>(entry.th32ProcessID)] = name;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return names;
+}
+
+std::string ipv4_to_string(DWORD address) {
+    in_addr addr{};
+    addr.S_un.S_addr = address;
+    char buffer[INET_ADDRSTRLEN] = {};
+    if (inet_ntop(AF_INET, &addr, buffer, sizeof(buffer)) == nullptr) return "";
+    return buffer;
+}
+
+std::string ipv6_to_string(const UCHAR* address) {
+    in6_addr addr{};
+    std::memcpy(&addr, address, sizeof(addr));
+    char buffer[INET6_ADDRSTRLEN] = {};
+    if (inet_ntop(AF_INET6, &addr, buffer, sizeof(buffer)) == nullptr) return "";
+    return buffer;
+}
+
+/// Ports in the MIB tables are in network byte order, in the low two bytes.
+uint16_t mib_port(DWORD port) {
+    return ntohs(static_cast<uint16_t>(port & 0xFFFF));
+}
+
+} // namespace
+
+std::vector<NetConnectionStats> NetConnectionsMonitor::read_windows(bool include_listen,
+                                                                   unsigned int limit) {
+    std::vector<NetConnectionStats> result;
+    const auto process_names = snapshot_process_names();
+
+    auto name_for = [&process_names](int pid) -> std::string {
+        const auto it = process_names.find(pid);
+        return it != process_names.end() ? it->second : "";
+    };
+
+    // -- TCP over IPv4 ------------------------------------------------------
+    {
+        ULONG size = 0;
+        GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+        std::vector<char> buffer(size);
+        if (size > 0 && GetExtendedTcpTable(buffer.data(), &size, FALSE, AF_INET,
+                                            TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
+            auto* table = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(buffer.data());
+            for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                const auto& row = table->table[i];
+                const std::string state = mib_tcp_state_name(row.dwState);
+                if (!include_listen && state == "LISTEN") continue;
+
+                NetConnectionStats c;
+                c.protocol     = "tcp4";
+                c.local_addr   = ipv4_to_string(row.dwLocalAddr);
+                c.local_port   = mib_port(row.dwLocalPort);
+                c.remote_addr  = ipv4_to_string(row.dwRemoteAddr);
+                c.remote_port  = mib_port(row.dwRemotePort);
+                c.state        = state;
+                c.pid          = static_cast<int>(row.dwOwningPid);
+                c.process_name = name_for(c.pid);
+                result.push_back(std::move(c));
+            }
+        }
+    }
+
+    // -- TCP over IPv6 ------------------------------------------------------
+    {
+        ULONG size = 0;
+        GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
+        std::vector<char> buffer(size);
+        if (size > 0 && GetExtendedTcpTable(buffer.data(), &size, FALSE, AF_INET6,
+                                            TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
+            auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_PID>(buffer.data());
+            for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                const auto& row = table->table[i];
+                const std::string state = mib_tcp_state_name(row.dwState);
+                if (!include_listen && state == "LISTEN") continue;
+
+                NetConnectionStats c;
+                c.protocol     = "tcp6";
+                c.local_addr   = ipv6_to_string(row.ucLocalAddr);
+                c.local_port   = mib_port(row.dwLocalPort);
+                c.remote_addr  = ipv6_to_string(row.ucRemoteAddr);
+                c.remote_port  = mib_port(row.dwRemotePort);
+                c.state        = state;
+                c.pid          = static_cast<int>(row.dwOwningPid);
+                c.process_name = name_for(c.pid);
+                result.push_back(std::move(c));
+            }
+        }
+    }
+
+    // -- UDP ----------------------------------------------------------------
+    if (include_listen) {
+        ULONG size = 0;
+        GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0);
+        std::vector<char> buffer(size);
+        if (size > 0 && GetExtendedUdpTable(buffer.data(), &size, FALSE, AF_INET,
+                                            UDP_TABLE_OWNER_PID, 0) == NO_ERROR) {
+            auto* table = reinterpret_cast<PMIB_UDPTABLE_OWNER_PID>(buffer.data());
+            for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                const auto& row = table->table[i];
+
+                NetConnectionStats c;
+                c.protocol     = "udp4";
+                c.local_addr   = ipv4_to_string(row.dwLocalAddr);
+                c.local_port   = mib_port(row.dwLocalPort);
+                c.state        = "UNCONN";
+                c.pid          = static_cast<int>(row.dwOwningPid);
+                c.process_name = name_for(c.pid);
+                result.push_back(std::move(c));
+            }
+        }
+    }
+
+    // Established connections first: they are what a reader looks for.
+    std::stable_sort(result.begin(), result.end(),
+                     [](const NetConnectionStats& a, const NetConnectionStats& b) {
+                         const int ra = (a.state == "ESTABLISHED") ? 0 : (a.state == "LISTEN" ? 1 : 2);
+                         const int rb = (b.state == "ESTABLISHED") ? 0 : (b.state == "LISTEN" ? 1 : 2);
+                         return ra < rb;
+                     });
+
+    if (limit > 0 && result.size() > limit) result.resize(limit);
+    return result;
+}
+
+#else
+std::vector<NetConnectionStats> NetConnectionsMonitor::read_windows(bool, unsigned int) {
+    return {};
+}
 #endif

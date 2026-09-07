@@ -78,6 +78,15 @@ std::string fit(std::string_view str, std::size_t width);
 /** @brief Right-align @p str within @p width columns (truncating if needed). */
 std::string fit_right(std::string_view str, std::size_t width);
 
+/**
+ * @brief A table cell of exactly @p width columns that always ends in a space.
+ *
+ * fit() alone lets a value of exactly @p width columns butt straight against
+ * the next column ("ContinuityCaptureAgentmichaelweiss"), so text columns in a
+ * table use this instead.
+ */
+std::string column(std::string_view str, std::size_t width);
+
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------

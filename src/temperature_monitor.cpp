@@ -24,12 +24,28 @@ std::optional<double> TemperatureMonitor::read_cpu_temperature() {
 
 TemperatureStats TemperatureMonitor::read() {
 #if defined(SYSMON_LINUX)
-    return read_all_sensors_linux();
+    TemperatureStats stats = read_all_sensors_linux();
 #elif defined(SYSMON_MACOS)
-    return read_all_sensors_macos();
+    TemperatureStats stats = read_all_sensors_macos();
 #else
-    return {};
+    // Windows exposes no unprivileged temperature API that works across
+    // vendors, so nothing is reported rather than something invented.
+    TemperatureStats stats;
 #endif
+    summarize(stats);
+    return stats;
+}
+
+void TemperatureMonitor::summarize(TemperatureStats& stats) {
+    const auto hottest = std::max_element(
+        stats.sensors.begin(), stats.sensors.end(),
+        [](const SensorReading& a, const SensorReading& b) {
+            return a.temperature_celsius < b.temperature_celsius;
+        });
+    if (hottest != stats.sensors.end()) {
+        stats.hottest_celsius = hottest->temperature_celsius;
+        stats.hottest_name    = hottest->name;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +161,45 @@ try_thermal:
 
                 if (!result.cpu_package.has_value()) {
                     result.cpu_package = temp_c;
+                }
+            }
+        }
+    } catch (...) {}
+
+    // Fan tachometers live next to the temperature sensors in hwmon.
+    try {
+        if (fs::exists(hwmon_base)) {
+            for (const auto& hwmon_entry : fs::directory_iterator(hwmon_base)) {
+                const std::string hwmon_dir = hwmon_entry.path().string();
+                const auto chip = utils::read_first_line(hwmon_dir + "/name").value_or("");
+
+                for (const auto& file_entry : fs::directory_iterator(hwmon_dir)) {
+                    const std::string fname = file_entry.path().filename().string();
+                    if (!utils::starts_with(fname, "fan") ||
+                        fname.find("_input") == std::string::npos) {
+                        continue;
+                    }
+
+                    const auto rpm = utils::read_first_line(file_entry.path().string());
+                    if (!rpm.has_value()) continue;
+                    const auto value = utils::to_double(*rpm);
+                    if (!value.has_value()) continue;
+
+                    const std::string base = fname.substr(0, fname.find("_input"));
+                    FanReading fan;
+                    fan.chip = chip;
+                    fan.name = utils::read_first_line(hwmon_dir + "/" + base + "_label")
+                                   .value_or(base);
+                    if (!chip.empty()) fan.name = chip + ": " + fan.name;
+                    fan.rpm = value.value();
+
+                    if (auto min_rpm = utils::read_first_line(hwmon_dir + "/" + base + "_min")) {
+                        fan.min_rpm = utils::to_double(*min_rpm);
+                    }
+                    if (auto max_rpm = utils::read_first_line(hwmon_dir + "/" + base + "_max")) {
+                        fan.max_rpm = utils::to_double(*max_rpm);
+                    }
+                    result.fans.push_back(std::move(fan));
                 }
             }
         }

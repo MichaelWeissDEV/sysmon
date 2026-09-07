@@ -99,3 +99,51 @@ TEST(CpuMonitorTest, UsageComponentsWithinRange) {
         EXPECT_LE(v, 100.0);
     }
 }
+// ---------------------------------------------------------------------------
+// /proc/stat summary counters
+// ---------------------------------------------------------------------------
+
+TEST(CpuMonitorTest, ParsesKernelCountersFromProcStat) {
+    const std::string content =
+        "cpu  100 0 50 900 0 0 0 0 0 0\n"
+        "cpu0 100 0 50 900 0 0 0 0 0 0\n"
+        "intr 123456 1 2 3\n"
+        "ctxt 987654\n"
+        "btime 1700000000\n"
+        "processes 4321\n"
+        "procs_running 3\n"
+        "procs_blocked 0\n";
+
+    const auto counters = CpuMonitor::parse_proc_stat_counters(content);
+    EXPECT_EQ(counters.context_switches, 987654u);
+    EXPECT_EQ(counters.interrupts, 123456u);
+    EXPECT_EQ(counters.forks, 4321u);
+    EXPECT_EQ(counters.procs_running, 3u);
+    EXPECT_EQ(counters.procs_blocked, 0u);
+}
+
+TEST(CpuMonitorTest, MissingCountersStayUnset) {
+    const auto counters = CpuMonitor::parse_proc_stat_counters("cpu 1 2 3 4\n");
+    EXPECT_FALSE(counters.context_switches.has_value());
+    EXPECT_FALSE(counters.interrupts.has_value());
+    EXPECT_FALSE(counters.forks.has_value());
+}
+
+TEST(CpuMonitorTest, BreakdownOverloadSplitsAllStates) {
+    CpuTimes a; a.user = 100; a.system = 100; a.idle = 700; a.iowait = 50; a.nice = 25; a.steal = 25;
+    CpuTimes b; b.user = 200; b.system = 200; b.idle = 1400; b.iowait = 100; b.nice = 50; b.steal = 50;
+
+    CpuMonitor::Breakdown out{};
+    const double usage = CpuMonitor::usage_from_delta(a, b, out);
+
+    EXPECT_GE(usage, 0.0);
+    EXPECT_LE(usage, 100.0);
+    for (double part : {out.user, out.system, out.iowait, out.idle,
+                        out.nice, out.irq, out.steal}) {
+        EXPECT_GE(part, 0.0);
+        EXPECT_LE(part, 100.0);
+    }
+    // Idle grew by 700 of a 1000-tick delta.
+    EXPECT_NEAR(out.idle, 70.0, 0.01);
+    EXPECT_NEAR(usage, 30.0, 0.01);
+}

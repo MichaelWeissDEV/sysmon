@@ -58,14 +58,17 @@ TEST(TextRendererTest, UnknownCpuValuesRenderedAsNA) {
     cfg.show_network = false;
     cfg.show_connections = false;
     cfg.show_processes = false;
+    cfg.show_battery = false;
+
+    Snapshot snap;
+    snap.cpu = make_cpu_with_unknown_values();
 
     TextRenderer renderer;
-    renderer.render(SystemStats{}, make_cpu_with_unknown_values(), MemoryStats{},
-                    {}, LoadStats{}, {}, {}, {}, {}, {}, TemperatureStats{}, cfg);
+    renderer.render(snap, cfg);
 
     std::string out = cap.str();
-    EXPECT_NE(out.find("Frequency     N/A"), std::string::npos) << out;
-    EXPECT_NE(out.find("Temperature   N/A"), std::string::npos) << out;
+    EXPECT_NE(out.find("Frequency       N/A"), std::string::npos) << out;
+    EXPECT_NE(out.find("Temperature     N/A"), std::string::npos) << out;
 }
 
 TEST(TextRendererTest, AppleGpuShowsUnifiedCapacityNotFakeUsage) {
@@ -78,11 +81,13 @@ TEST(TextRendererTest, AppleGpuShowsUnifiedCapacityNotFakeUsage) {
     cfg.show_network = false;
     cfg.show_connections = false;
     cfg.show_processes = false;
+    cfg.show_battery = false;
+
+    Snapshot snap;
+    snap.gpus = {make_apple_gpu_unavailable()};
 
     TextRenderer renderer;
-    renderer.render(SystemStats{}, CpuStats{}, MemoryStats{},
-                    {make_apple_gpu_unavailable()}, LoadStats{},
-                    {}, {}, {}, {}, {}, TemperatureStats{}, cfg);
+    renderer.render(snap, cfg);
 
     std::string out = cap.str();
     EXPECT_NE(out.find("Usage       N/A"), std::string::npos) << out;
@@ -102,17 +107,20 @@ TEST(TextRendererTest, KnownCpuValuesRenderedNumerically) {
     cfg.show_network = false;
     cfg.show_connections = false;
     cfg.show_processes = false;
+    cfg.show_battery = false;
 
     CpuStats cpu = make_cpu_with_unknown_values();
     cpu.frequency_mhz = 3200.0;
     cpu.max_frequency_mhz = 3600.0;
     cpu.temperature_celsius = 45.5;
 
+    Snapshot snap;
+    snap.cpu = cpu;
+
     TextRenderer renderer;
-    renderer.render(SystemStats{}, cpu, MemoryStats{},
-                    {}, LoadStats{}, {}, {}, {}, {}, {}, TemperatureStats{}, cfg);
+    renderer.render(snap, cfg);
 
     std::string out = cap.str();
-    EXPECT_NE(out.find("Frequency     3200 MHz / 3600 MHz max"), std::string::npos) << out;
-    EXPECT_NE(out.find("Temperature   45.5 °C"), std::string::npos) << out;
+    EXPECT_NE(out.find("Frequency       3200 MHz / 3600 MHz max"), std::string::npos) << out;
+    EXPECT_NE(out.find("Temperature     45.5 °C"), std::string::npos) << out;
 }

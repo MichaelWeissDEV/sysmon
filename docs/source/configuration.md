@@ -1,4 +1,26 @@
-# Configuration & Customization
+# Configuration
+
+sysmon reads an INI-style configuration file from:
+
+- **Linux / macOS**: `$XDG_CONFIG_HOME/sysmon/sysmon.conf`, falling back to
+  `~/.config/sysmon/sysmon.conf`
+- **Windows**: `%APPDATA%\sysmon\sysmon.conf`
+
+Write a fully commented file with the current defaults using:
+
+```bash
+sysmon --generate-config
+```
+
+## Keys added in this release
+
+| Section | Key | Meaning |
+|---------|-----|---------|
+| `display` | `show_battery` | Show the battery and power section |
+| `display` | `show_network_details` | Per-interface MAC, MTU, totals and errors |
+| `display` | `show_network_inactive` | Include interfaces that carry no traffic |
+| `display` | `proc_sort` | Process order: `cpu`, `mem`, `pid`, `name`, `time` |
+ & Customization
 
 `sysmon` allows you to customize every aspect of the monitoring dashboard. You can configure what components are shown, set thresholds, filter network interfaces or file systems, and toggle between detailed deep monitoring or a compact average summary dashboard.
 
@@ -20,6 +42,11 @@ To view the currently active configuration in your terminal:
 ```bash
 sysmon --show-config
 ```
+
+`--show-config` prints a human-readable dump of the settings sysmon resolved
+from the config file and the command line. It is not itself a config file:
+redirecting it into `sysmon.conf` produces a file that parses back to all
+defaults. Use `--generate-config` to write an editable file.
 
 ### Complete `sysmon.conf` Example
 
@@ -134,4 +161,5 @@ You can also override any configuration setting using CLI flags:
 ### Configuration File Options
 - `--config /path/to/file.conf` : Load custom configuration file
 - `--generate-config` : Create default config at the config file location
-- `--show-config` : Print current parsed configuration
+- `--show-config` : Print the resolved configuration as a readable dump
+  (not a loadable config file — use `--generate-config` for that)

@@ -6,18 +6,23 @@
 #ifndef SYSMON_PROCESS_MONITOR_HPP
 #define SYSMON_PROCESS_MONITOR_HPP
 
-#include "sysmon/stats.hpp"
 #include "sysmon/platform.hpp"
-#include <vector>
-#include <string>
-#include <map>
+#include "sysmon/stats.hpp"
 #include <chrono>
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
 
 /**
  * @brief Collects process information and computes per-process CPU usage.
  *
- * On Linux this reads /proc/<pid>/stat and /proc/<pid>/status.
- * On macOS it uses sysctl / proc_pidinfo.
+ * - Linux:   /proc/<pid>/{stat,status,io,cmdline,fd}
+ * - macOS:   sysctl KERN_PROC_ALL and proc_pidinfo / proc_pid_rusage
+ * - Windows: Toolhelp32 plus the per-process Win32 query APIs
+ *
+ * CPU percentages use the convention that 100 % is one fully busy logical core,
+ * so a process on an 8-core machine can legitimately report up to 800 %.
  */
 class ProcessMonitor {
 public:
@@ -25,16 +30,22 @@ public:
 
     /**
      * @brief Read the current process list.
-     * @param limit  Maximum number of processes to return (sorted by CPU).
-     *               0 = return all.
-     * @return Vector of ProcessStats sorted by cpu_percent descending.
+     * @param limit  Maximum number of processes to return (0 = all).
+     * @param sort   Ordering applied before the limit is enforced.
+     * @return Vector of ProcessStats in the requested order.
      */
-    std::vector<ProcessStats> read(unsigned int limit = 20);
+    std::vector<ProcessStats> read(unsigned int limit = 20,
+                                   ProcSort sort = ProcSort::Cpu);
+
+    /** @brief Order a process list in place. Exposed for testing. */
+    static void sort_processes(std::vector<ProcessStats>& procs, ProcSort sort);
 
 private:
     struct ProcSnapshot {
         unsigned long long utime{0};
         unsigned long long stime{0};
+        uint64_t io_read_bytes{0};
+        uint64_t io_write_bytes{0};
         std::chrono::steady_clock::time_point timestamp;
     };
 
@@ -46,10 +57,14 @@ private:
     // Platform-specific
     std::vector<ProcessStats> read_linux(unsigned int limit);
     std::vector<ProcessStats> read_macos(unsigned int limit);
+    std::vector<ProcessStats> read_windows(unsigned int limit);
 
     // Helpers
     std::string get_username(unsigned int uid);
-    std::string read_proc_name(int pid);
+
+    /// Forget entries for processes that no longer exist, so the snapshot map
+    /// does not grow without bound on a busy machine.
+    void prune_snapshots(const std::vector<ProcessStats>& live);
 };
 
 #endif // SYSMON_PROCESS_MONITOR_HPP

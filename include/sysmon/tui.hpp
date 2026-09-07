@@ -24,20 +24,9 @@ public:
     ~TUI();
 
     /**
-     * @brief Perform a full screen render with all data and active configuration.
+     * @brief Perform a full screen render of one snapshot.
      */
-    void render(const SystemStats&                   system,
-                const CpuStats&                      cpu,
-                const MemoryStats&                   memory,
-                const std::vector<GpuStats>&         gpus,
-                const LoadStats&                     load,
-                const std::vector<DiskStats>&        disks,
-                const std::vector<DiskIOStats>&      disk_io,
-                const std::vector<NetworkStats>&     net,
-                const std::vector<NetConnectionStats>& conns,
-                const std::vector<ProcessStats>&     procs,
-                const TemperatureStats&              temps,
-                const Config&                        cfg);
+    void render(const Snapshot& snap, const Config& cfg);
 
     /** @brief Clear the screen and reset cursor. */
     void clear();
@@ -88,7 +77,9 @@ private:
     void render_gpu_section(std::ostringstream& out, const std::vector<GpuStats>& gpus, int width, const Config& cfg);
     void render_memory_section(std::ostringstream& out, const MemoryStats& mem, int width, const Config& cfg);
     void render_load_section(std::ostringstream& out, const LoadStats& load, int width);
-    void render_network_section(std::ostringstream& out, const std::vector<NetworkStats>& net, int width, const Config& cfg);
+    void render_battery_section(std::ostringstream& out, const BatteryStats& battery, int width);
+    void render_network_section(std::ostringstream& out, const std::vector<NetworkStats>& net,
+                                const NetGlobalStats& global, int width, const Config& cfg);
     void render_connections_section(std::ostringstream& out, const std::vector<NetConnectionStats>& conns, int width, const Config& cfg);
     void render_disk_section(std::ostringstream& out, const std::vector<DiskStats>& disks, const std::vector<DiskIOStats>& io, int width, const Config& cfg);
     void render_temperature_section(std::ostringstream& out, const TemperatureStats& temps, int width, const Config& cfg);

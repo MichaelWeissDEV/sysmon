@@ -220,6 +220,13 @@ std::string fit(std::string_view str, std::size_t width) {
     return out;
 }
 
+std::string column(std::string_view str, std::size_t width) {
+    if (width == 0) return "";
+    // Reserve the final column for the separator, so neighbouring cells can
+    // never run together.
+    return fit(truncate(str, width - 1), width);
+}
+
 std::string fit_right(std::string_view str, std::size_t width) {
     std::string out = truncate(str, width);
     const std::size_t w = display_width(out);
@@ -262,13 +269,17 @@ std::string format_bytes_per_sec(double bps) {
 
 std::string format_rate(double per_sec, const std::string& unit) {
     if (!std::isfinite(per_sec) || per_sec < 0) per_sec = 0;
+    // "12.3 k/s" reads well, but "46 /s" does not: only separate the number
+    // from the unit when the unit is a word rather than a "/s" suffix.
+    const std::string sep = (!unit.empty() && unit.front() == '/') ? "" : " ";
+
     std::ostringstream oss;
     if (per_sec >= 1'000'000.0) {
         oss << std::fixed << std::setprecision(1) << per_sec / 1'000'000.0 << " M" << unit;
     } else if (per_sec >= 1000.0) {
         oss << std::fixed << std::setprecision(1) << per_sec / 1000.0 << " k" << unit;
     } else {
-        oss << std::fixed << std::setprecision(per_sec < 10.0 ? 1 : 0) << per_sec << " " << unit;
+        oss << std::fixed << std::setprecision(per_sec < 10.0 ? 1 : 0) << per_sec << sep << unit;
     }
     return oss.str();
 }

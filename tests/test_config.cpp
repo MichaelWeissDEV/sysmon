@@ -136,3 +136,124 @@ TEST(ConfigSaveTest, RoundTrip) {
     EXPECT_EQ(loaded.refresh_interval, 7);
     EXPECT_FALSE(loaded.show_processes);
 }
+// Every persisted field, mutated away from its default and round-tripped.
+//
+// save_to() and load_from() name their keys in two independent places, so a
+// typo in either one loses that setting silently: the user's edit is written,
+// never read back, and the value reverts to the default with no error.  Only an
+// exhaustive check catches that, so this test must grow with the struct.
+//
+// Deliberately excluded: show_gpu_per_core, which config.hpp marks as reserved
+// for future use and which neither the writer nor the parser handles.
+TEST(ConfigSaveTest, EveryPersistedFieldSurvivesRoundTrip) {
+    fs::path dir = fs::temp_directory_path() /
+                   ("sysmon_test_roundtrip_" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const std::string path = (dir / "sysmon.conf").string();
+
+    Config cfg = Config::defaults();
+
+    // [display]
+    cfg.refresh_interval            = 11;
+    cfg.tui_enabled                 = false;
+    cfg.compact_mode                = true;
+    cfg.show_cpu                    = false;
+    cfg.show_cpu_per_core           = false;
+    cfg.show_cpu_cores_detail       = false;
+    cfg.show_memory                 = false;
+    cfg.show_swap                   = false;
+    cfg.show_memory_cache           = false;
+    cfg.show_gpu                    = false;
+    cfg.show_gpu_memory             = false;
+    cfg.show_battery                = false;
+    cfg.show_temperature            = false;
+    cfg.show_temperature_per_sensor = false;
+    cfg.show_disk                   = false;
+    cfg.show_disk_io                = false;
+    cfg.show_network                = false;
+    cfg.show_network_per_iface      = false;
+    cfg.show_network_sparkline      = false;
+    cfg.show_network_details        = true;
+    cfg.show_network_inactive       = true;
+    cfg.show_connections            = false;
+    cfg.connections_limit           = 13;
+    cfg.connections_show_listen     = true;
+    cfg.show_processes              = false;
+    cfg.proc_limit                  = 17;
+    cfg.show_proc_threads           = false;
+    cfg.show_proc_network           = true;
+    cfg.proc_sort                   = ProcSort::Time;
+
+    // [tui]
+    cfg.tui_use_unicode = false;
+    cfg.tui_use_colors  = false;
+    cfg.sparkline_length = 19;
+    cfg.proc_sort_col    = 2;
+
+    // Exclusion sets
+    cfg.excluded_interfaces  = {"eth9", "tun7"};
+    cfg.excluded_filesystems = {"tmpfs", "nfs"};
+    cfg.excluded_sensors     = {"acpitz", "coretemp"};
+
+    cfg.save_to(path);
+    const Config got = Config::load_from(path);
+
+    EXPECT_EQ(got.refresh_interval, 11);
+    EXPECT_FALSE(got.tui_enabled);
+    EXPECT_TRUE(got.compact_mode);
+    EXPECT_FALSE(got.show_cpu);
+    EXPECT_FALSE(got.show_cpu_per_core);
+    EXPECT_FALSE(got.show_cpu_cores_detail);
+    EXPECT_FALSE(got.show_memory);
+    EXPECT_FALSE(got.show_swap);
+    EXPECT_FALSE(got.show_memory_cache);
+    EXPECT_FALSE(got.show_gpu);
+    EXPECT_FALSE(got.show_gpu_memory);
+    EXPECT_FALSE(got.show_battery);
+    EXPECT_FALSE(got.show_temperature);
+    EXPECT_FALSE(got.show_temperature_per_sensor);
+    EXPECT_FALSE(got.show_disk);
+    EXPECT_FALSE(got.show_disk_io);
+    EXPECT_FALSE(got.show_network);
+    EXPECT_FALSE(got.show_network_per_iface);
+    EXPECT_FALSE(got.show_network_sparkline);
+    EXPECT_TRUE(got.show_network_details);
+    EXPECT_TRUE(got.show_network_inactive);
+    EXPECT_FALSE(got.show_connections);
+    EXPECT_EQ(got.connections_limit, 13);
+    EXPECT_TRUE(got.connections_show_listen);
+    EXPECT_FALSE(got.show_processes);
+    EXPECT_EQ(got.proc_limit, 17);
+    EXPECT_FALSE(got.show_proc_threads);
+    EXPECT_TRUE(got.show_proc_network);
+    EXPECT_EQ(got.proc_sort, ProcSort::Time);
+
+    EXPECT_FALSE(got.tui_use_unicode);
+    EXPECT_FALSE(got.tui_use_colors);
+    EXPECT_EQ(got.sparkline_length, 19);
+    EXPECT_EQ(got.proc_sort_col, 2);
+
+    EXPECT_EQ(got.excluded_interfaces,  cfg.excluded_interfaces);
+    EXPECT_EQ(got.excluded_filesystems, cfg.excluded_filesystems);
+    EXPECT_EQ(got.excluded_sensors,     cfg.excluded_sensors);
+
+    fs::remove_all(dir);
+}
+
+// Each sort key must survive the writer/parser pair, not just the default.
+TEST(ConfigSaveTest, EverySortOrderSurvivesRoundTrip) {
+    fs::path dir = fs::temp_directory_path() /
+                   ("sysmon_test_sort_" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const std::string path = (dir / "sysmon.conf").string();
+
+    for (const ProcSort sort : {ProcSort::Cpu, ProcSort::Memory, ProcSort::Pid,
+                                ProcSort::Name, ProcSort::Time}) {
+        Config cfg = Config::defaults();
+        cfg.proc_sort = sort;
+        cfg.save_to(path);
+        EXPECT_EQ(Config::load_from(path).proc_sort, sort);
+    }
+
+    fs::remove_all(dir);
+}

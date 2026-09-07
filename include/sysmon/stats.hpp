@@ -227,7 +227,7 @@ struct DiskIOStats {
 
 /** @brief Per-interface network statistics. */
 struct NetworkStats {
-    std::string  interface;
+    std::string  name;          ///< Interface name ("eth0", "Ethernet")
     uint64_t     rx_bytes_total{0};
     uint64_t     tx_bytes_total{0};
     uint64_t     rx_packets_total{0};
