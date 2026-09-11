@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <initializer_list>
 #include <sstream>
 #include <cstdint>
 
@@ -116,6 +117,37 @@ private:
      * @param reserve Rows to keep for whatever is printed after the list.
      */
     int rows_left(const std::ostringstream& out, int height, int reserve) const;
+
+    /**
+     * @brief Cut an assembled frame to at most @p rows painted lines.
+     *
+     * The last line of defence for the vertical axis.  Lists adapt through
+     * rows_left(), but the fixed content above them does not: on a 15-row
+     * terminal the memory view still has a dozen labelled values to print, and
+     * a frame taller than the terminal makes it *scroll* — which moves every
+     * later frame's cursor-home to the wrong place and tears the display apart.
+     * Dropping the overflow is strictly better than scrolling.
+     */
+    static std::string clip_frame(const std::string& frame, int rows);
+
+    /**
+     * @brief Width for a table's flexible column, dropping optional ones to fit.
+     *
+     * Table layouts kept being written as a fixed cost plus a flexible column
+     * with its own minimum, and the two could add up past the terminal —
+     * five separate tables overflowed below 55 columns that way.  Here the
+     * optional columns are given up one at a time, least valuable last, until
+     * the flexible column has room; the row can then never exceed @p width.
+     *
+     * @param width     Terminal width.
+     * @param fixed     Always-present columns, margins and gaps included.
+     * @param optional  Optional column widths, most valuable first.
+     * @param min_flex  Smallest useful width for the flexible column.
+     * @param taken     Out: how many leading optional columns fit.
+     * @return Width for the flexible column, at least 1.
+     */
+    static int flex_column(int width, int fixed, std::initializer_list<int> optional,
+                           int min_flex, int* taken);
 
     // Full-screen focus views
     void render_overview(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width);

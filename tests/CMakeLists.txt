@@ -36,6 +36,7 @@ endmacro()
 # Unit tests
 # ---------------------------------------------------------------------------
 sysmon_test(test_utils                 test_utils.cpp)
+sysmon_test(test_crosscheck            test_crosscheck.cpp)
 sysmon_test(test_config                test_config.cpp)
 sysmon_test(test_cpu_monitor           test_cpu_monitor.cpp)
 sysmon_test(test_gpu_monitor           test_gpu_monitor.cpp)

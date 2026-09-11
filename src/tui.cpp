@@ -259,47 +259,111 @@ void TUI::render_header(std::ostringstream& out, const SystemStats& sys, int wid
 void TUI::render_cpu_section(std::ostringstream& out, const CpuStats& cpu, int width, const Config& cfg) {
     out << section_header("CPU", width) << "\033[K\n";
 
-    std::string cpu_bar  = progress_bar(cpu.usage_percent, std::max(12, width - 52));
-    std::string spark    = c_accent() + sparkline(cpu_history_, 16) + reset_color();
+    // " Usage   " + "xxx.x%" + two gaps is the fixed cost; the sparkline is
+    // dropped entirely before the bar is squeezed below a useful width.
+    constexpr int kUsageLabel = 9;   // " Usage   "
+    constexpr int kUsagePct   = 6;   // "100.0%"
+    const int spark_w = (width - kUsageLabel - kUsagePct - 4 - 16 >= 8) ? 16 : 0;
+    const int bar_w   = std::max(4, width - kUsageLabel - kUsagePct
+                                    - (spark_w > 0 ? 4 + spark_w : 2));
+
+    std::string cpu_bar = progress_bar(cpu.usage_percent, bar_w);
+    std::string spark   = spark_w > 0
+                        ? "  " + c_accent() + sparkline(cpu_history_, spark_w) + reset_color()
+                        : std::string();
 
     out << c_label() << " Model   " << reset_color() << c_value()
         << utils::truncate(cpu.model, static_cast<size_t>(std::max(10, width - 12)))
         << reset_color() << "\033[K\n";
-    out << c_label() << " Cores   " << reset_color() << c_value()
-        << cpu.logical_cores << " logical / " << cpu.physical_cores << " physical" << reset_color();
+    // The core count is always shown; frequency, temperature and thermal state
+    // are appended only while the row still fits, so a narrow terminal drops
+    // the least important of them instead of wrapping.
+    {
+        // Even the core count can be too long for a very narrow terminal, so
+        // the mandatory part is truncated rather than assumed to fit.
+        std::ostringstream counts;
+        counts << cpu.logical_cores << " logical / " << cpu.physical_cores << " physical";
+        const std::string shown =
+            utils::truncate(counts.str(), static_cast<size_t>(std::max(1, width - 9)));
 
-    if (cpu.frequency_mhz.has_value()) {
-        out << c_dim() << "  @" << reset_color() << c_value()
-            << std::fixed << std::setprecision(0) << cpu.frequency_mhz.value() << " MHz" << reset_color();
+        std::ostringstream plain;
+        plain << " Cores   " << shown;
+
+        out << c_label() << " Cores   " << reset_color() << c_value() << shown << reset_color();
+
+        const auto fits = [&](const std::string& addition) {
+            return static_cast<int>(utils::display_width(plain.str() + addition)) <= width;
+        };
+
+        if (cpu.frequency_mhz.has_value()) {
+            std::ostringstream freq;
+            freq << "  @" << std::fixed << std::setprecision(0)
+                 << cpu.frequency_mhz.value() << " MHz";
+            if (fits(freq.str())) {
+                plain << freq.str();
+                out << c_dim() << "  @" << reset_color() << c_value()
+                    << std::fixed << std::setprecision(0) << cpu.frequency_mhz.value()
+                    << " MHz" << reset_color();
+            }
+        }
+        if (cpu.temperature_celsius.has_value()) {
+            const double t = cpu.temperature_celsius.value();
+            std::ostringstream temp;
+            temp << "  " << std::fixed << std::setprecision(1) << t << " °C";
+            if (fits(temp.str())) {
+                plain << temp.str();
+                out << "  " << temp_color(t) << std::fixed << std::setprecision(1)
+                    << t << " °C" << reset_color();
+            }
+        }
+        if (!cpu.thermal_pressure.empty()) {
+            // Thermal pressure is a constraint level, not a temperature.
+            const std::string addition = "  thermal " + cpu.thermal_pressure;
+            if (fits(addition)) {
+                const std::string col = (cpu.thermal_pressure == "Nominal") ? c_good() : c_warn();
+                out << c_dim() << "  thermal " << reset_color() << col
+                    << cpu.thermal_pressure << reset_color();
+            }
+        }
+        out << "\033[K\n";
     }
-    if (cpu.temperature_celsius.has_value()) {
-        const double t = cpu.temperature_celsius.value();
-        out << "  " << temp_color(t) << std::fixed << std::setprecision(1) << t << " °C" << reset_color();
-    }
-    if (!cpu.thermal_pressure.empty()) {
-        // Thermal pressure is a constraint level, not a temperature.
-        const std::string col = (cpu.thermal_pressure == "Nominal") ? c_good() : c_warn();
-        out << c_dim() << "  thermal " << reset_color() << col << cpu.thermal_pressure << reset_color();
-    }
-    out << "\033[K\n";
 
     out << c_label() << " Usage   " << reset_color()
         << usage_color(cpu.usage_percent)
         << std::fixed << std::setprecision(1) << std::setw(5) << cpu.usage_percent << "%" << reset_color()
-        << "  " << cpu_bar << "  " << spark << "\033[K\n";
+        << "  " << cpu_bar << spark << "\033[K\n";
 
     if (cfg.show_cpu_cores_detail && !cfg.compact_mode()) {
-        out << c_label() << " Breakdown " << reset_color()
-            << c_good() << "usr " << std::fixed << std::setprecision(1) << cpu.user_percent << "%" << reset_color()
-            << c_dim() << " | " << reset_color()
-            << c_accent() << "sys " << std::fixed << std::setprecision(1) << cpu.system_percent << "%" << reset_color();
-        // On a narrow terminal keep only the two states that matter most.
-        if (width >= 64) {
+        // Each state is appended only while the row still fits, measured on the
+        // plain text — a fixed "width >= 64" threshold said nothing about how
+        // wide these particular numbers happened to be.
+        const auto pct = [](double value) {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(1) << value << "%";
+            return oss.str();
+        };
+        std::string plain = " Breakdown ";
+        const auto fits = [&](const std::string& addition) {
+            return static_cast<int>(utils::display_width(plain + addition)) <= width;
+        };
+
+        out << c_label() << " Breakdown " << reset_color();
+        if (fits("usr " + pct(cpu.user_percent))) {
+            plain += "usr " + pct(cpu.user_percent);
+            out << c_good() << "usr " << pct(cpu.user_percent) << reset_color();
+        }
+        if (fits(" | sys " + pct(cpu.system_percent))) {
+            plain += " | sys " + pct(cpu.system_percent);
             out << c_dim() << " | " << reset_color()
-                << c_warn() << "iowait " << std::fixed << std::setprecision(1)
-                << cpu.iowait_percent << "%" << reset_color()
-                << c_dim() << " | idle " << std::fixed << std::setprecision(1)
-                << cpu.idle_percent << "%" << reset_color();
+                << c_accent() << "sys " << pct(cpu.system_percent) << reset_color();
+        }
+        if (fits(" | iowait " + pct(cpu.iowait_percent))) {
+            plain += " | iowait " + pct(cpu.iowait_percent);
+            out << c_dim() << " | " << reset_color()
+                << c_warn() << "iowait " << pct(cpu.iowait_percent) << reset_color();
+        }
+        if (fits(" | idle " + pct(cpu.idle_percent))) {
+            out << c_dim() << " | idle " << pct(cpu.idle_percent) << reset_color();
         }
         out << "\033[K\n";
     }
@@ -840,9 +904,13 @@ void TUI::render(const Snapshot& snap, const Config& cfg, ViewState& view) {
         default:                render_overview(out, snap, cfg, W);                     break;
     }
 
-    render_footer(out, W, cfg);
-    out << "\033[J";
-    std::cout << out.str() << std::flush;
+    // The footer earns the last row unconditionally: it carries the quit key,
+    // and a user on a short terminal is exactly the one who needs to find it.
+    std::ostringstream footer;
+    render_footer(footer, W, cfg);
+
+    std::cout << clip_frame(out.str(), std::max(0, H - 1))
+              << footer.str() << "\033[J" << std::flush;
 }
 
 void TUI::render_overview(std::ostringstream& out, const Snapshot& snap, const Config& cfg, int width) {
@@ -933,6 +1001,30 @@ TUI::ListWindow TUI::clamp_window(ViewState& view, int total_rows, int viewport_
     return w;
 }
 
+std::string TUI::clip_frame(const std::string& frame, int rows) {
+    if (rows <= 0) return "";
+
+    int seen = 0;
+    for (size_t i = 0; i < frame.size(); ++i) {
+        if (frame[i] != '\n') continue;
+        if (++seen == rows) return frame.substr(0, i + 1);
+    }
+    return frame;
+}
+
+int TUI::flex_column(int width, int fixed, std::initializer_list<int> optional,
+                     int min_flex, int* taken) {
+    int cost  = fixed;
+    int count = 0;
+    for (const int column : optional) {
+        if (width - (cost + column) < min_flex) break;
+        cost += column;
+        ++count;
+    }
+    if (taken != nullptr) *taken = count;
+    return std::max(1, width - cost);
+}
+
 int TUI::rows_left(const std::ostringstream& out, int height, int reserve) const {
     const std::string so_far = out.str();
     const int used = static_cast<int>(std::count(so_far.begin(), so_far.end(), '\n'));
@@ -1004,13 +1096,21 @@ void TUI::render_list_status(std::ostringstream& out, const ListWindow& window,
 }
 
 void TUI::bar_row(std::ostringstream& out, const std::string& label, double percent, int width) {
-    // 2 margin + label + bar + 1 space + 6 digits + 2 for " %".
-    const int label_w = std::max(6, std::min(22, (width - 2) / 3));
-    const int bar_w   = std::max(6, width - 13 - label_w);
+    // 2 margin + label + bar, then " 100.0 %" costs 9 more.  Nothing here has
+    // a minimum it can insist on: on a 20-column terminal a floor of 6 on both
+    // the label and the bar was three columns more than the terminal had.
+    const int label_w = std::min(22, std::max(1, (width - 2) / 3));
+    const int rest    = std::max(1, width - 2 - label_w);
+    const bool show_percent = rest >= 13;   // a bar of 4 plus the 9-column suffix
+    const int bar_w   = std::max(1, rest - (show_percent ? 9 : 0));
+
     out << "  " << c_label() << utils::fit(label, static_cast<size_t>(label_w)) << reset_color()
-        << progress_bar(percent, bar_w) << " "
-        << usage_color(percent) << std::fixed << std::setprecision(1)
-        << std::setw(6) << percent << " %" << reset_color() << "\033[K\n";
+        << progress_bar(percent, bar_w);
+    if (show_percent) {
+        out << " " << usage_color(percent) << std::fixed << std::setprecision(1)
+            << std::setw(6) << percent << " %" << reset_color();
+    }
+    out << "\033[K\n";
 }
 
 void TUI::kv(std::ostringstream& out, const std::string& label, const std::string& value, int width) {
@@ -1221,20 +1321,36 @@ void TUI::render_memory_view(std::ostringstream& out, const Snapshot& snap, cons
                          });
 
         const int rows = cfg.detail_level >= DetailLevel::Detailed ? 12 : 6;
-        const int name_w = std::max(10, std::min(30, width - 46));
+
+        // Margin, PID and gap are fixed; RSS matters most, then the percentage,
+        // and VIRT is the first thing to give up on a narrow terminal.
+        int columns = 0;
+        const int name_w = std::min(30, flex_column(width, 2 + 7 + 2, {11, 8, 11}, 8, &columns));
+        const bool show_rss  = columns >= 1;
+        const bool show_pct  = columns >= 2;
+        const bool show_virt = columns >= 3;
+
         out << c_dim() << "  " << utils::fit_right("PID", 7) << "  "
             << utils::fit("COMMAND", static_cast<size_t>(name_w))
-            << utils::fit_right("RSS", 11) << utils::fit_right("VIRT", 11)
-            << utils::fit_right("MEM%", 8) << reset_color() << "\033[K\n";
+            << utils::fit_right("RSS", show_rss ? 11 : 0)
+            << utils::fit_right("VIRT", show_virt ? 11 : 0)
+            << utils::fit_right("MEM%", show_pct ? 8 : 0) << reset_color() << "\033[K\n";
         for (int i = 0; i < rows && i < static_cast<int>(by_rss.size()); ++i) {
             const ProcessStats& p = *by_rss[static_cast<size_t>(i)];
             out << "  " << c_dim() << utils::fit_right(std::to_string(p.pid), 7) << reset_color()
-                << "  " << c_value() << utils::column(p.name, static_cast<size_t>(name_w)) << reset_color()
-                << c_value() << utils::fit_right(format_bytes(p.mem_rss_bytes), 11) << reset_color()
-                << c_dim()   << utils::fit_right(format_bytes(p.mem_vms_bytes), 11) << reset_color()
-                << usage_color(p.mem_percent) << utils::fit_right(
-                       utils::format_opt(std::optional<double>(p.mem_percent), "%", 1), 8)
-                << reset_color() << "\033[K\n";
+                << "  " << c_value() << utils::column(p.name, static_cast<size_t>(name_w)) << reset_color();
+            if (show_rss) {
+                out << c_value() << utils::fit_right(format_bytes(p.mem_rss_bytes), 11) << reset_color();
+            }
+            if (show_virt) {
+                out << c_dim() << utils::fit_right(format_bytes(p.mem_vms_bytes), 11) << reset_color();
+            }
+            if (show_pct) {
+                out << usage_color(p.mem_percent) << utils::fit_right(
+                           utils::format_opt(std::optional<double>(p.mem_percent), "%", 1), 8)
+                    << reset_color();
+            }
+            out << "\033[K\n";
         }
     }
 }
@@ -1299,14 +1415,22 @@ void TUI::render_disk_view(std::ostringstream& out, const Snapshot& snap, const 
                            ViewState& view, int width, int height) {
     out << section_header("Filesystems", width) << "\033[K\n";
 
-    const bool wide    = width >= 92;
-    const int  mount_w = std::max(12, std::min(34, width - (wide ? 62 : 44)));
+    // Used, then the percentage, then the total, then the filesystem type and
+    // inode use — dropped in that order as the terminal narrows.
+    int fs_columns = 0;
+    const int mount_w = std::min(34, flex_column(width, 2, {11, 8, 11, 10, 9}, 10, &fs_columns));
+    const bool show_used   = fs_columns >= 1;
+    const bool show_pct    = fs_columns >= 2;
+    const bool show_size   = fs_columns >= 3;
+    const bool show_fs     = fs_columns >= 4;
+    const bool show_inodes = fs_columns >= 5;
 
     out << c_dim() << "  " << utils::fit("MOUNTPOINT", static_cast<size_t>(mount_w))
-        << utils::fit("FS", wide ? 10 : 0)
-        << utils::fit_right("USED", 11) << utils::fit_right("SIZE", 11)
-        << utils::fit_right("USE%", 8)
-        << utils::fit_right("INODE%", wide ? 9 : 0)
+        << utils::fit("FS", show_fs ? 10 : 0)
+        << utils::fit_right("USED", show_used ? 11 : 0)
+        << utils::fit_right("SIZE", show_size ? 11 : 0)
+        << utils::fit_right("USE%", show_pct ? 8 : 0)
+        << utils::fit_right("INODE%", show_inodes ? 9 : 0)
         << reset_color() << "\033[K\n";
 
     // Disks and their I/O counters share the viewport, so the filesystem list
@@ -1317,13 +1441,19 @@ void TUI::render_disk_view(std::ostringstream& out, const Snapshot& snap, const 
     for (int i = win.first; i < win.first + win.count; ++i) {
         const DiskStats& d = snap.disks[static_cast<size_t>(i)];
         out << "  " << c_value() << utils::column(d.mountpoint, static_cast<size_t>(mount_w)) << reset_color();
-        if (wide) out << c_dim() << utils::column(d.filesystem_type, 10) << reset_color();
-        out << c_value() << utils::fit_right(format_bytes(d.used_bytes), 11) << reset_color()
-            << c_dim()   << utils::fit_right(format_bytes(d.total_bytes), 11) << reset_color()
-            << usage_color(d.usage_percent)
-            << utils::fit_right(utils::format_opt(std::optional<double>(d.usage_percent), "%", 1), 8)
-            << reset_color();
-        if (wide) {
+        if (show_fs) out << c_dim() << utils::column(d.filesystem_type, 10) << reset_color();
+        if (show_used) {
+            out << c_value() << utils::fit_right(format_bytes(d.used_bytes), 11) << reset_color();
+        }
+        if (show_size) {
+            out << c_dim() << utils::fit_right(format_bytes(d.total_bytes), 11) << reset_color();
+        }
+        if (show_pct) {
+            out << usage_color(d.usage_percent)
+                << utils::fit_right(utils::format_opt(std::optional<double>(d.usage_percent), "%", 1), 8)
+                << reset_color();
+        }
+        if (show_inodes) {
             out << c_dim() << utils::fit_right(utils::format_opt(d.inode_usage_percent, "%", 1), 9)
                 << reset_color();
         }
@@ -1356,29 +1486,45 @@ void TUI::render_disk_view(std::ostringstream& out, const Snapshot& snap, const 
         return;
     }
 
-    const int dev_w = std::max(8, std::min(20, width - (wide ? 74 : 52)));
+    // Read and write rates first, then IOPS, then the timing columns.
+    int io_columns = 0;
+    const int dev_w = std::min(20, flex_column(width, 2, {12, 12, 14, 8, 14}, 6, &io_columns));
+    const bool show_read  = io_columns >= 1;
+    const bool show_write = io_columns >= 2;
+    const bool show_iops  = io_columns >= 3;
+    const bool show_util  = io_columns >= 4;
+    const bool show_lat   = io_columns >= 5;
+
     out << c_dim() << "  " << utils::fit("DEVICE", static_cast<size_t>(dev_w))
-        << utils::fit_right("READ", 12) << utils::fit_right("WRITE", 12)
-        << utils::fit_right("IOPS r/w", 14)
-        << utils::fit_right("UTIL", wide ? 8 : 0)
-        << utils::fit_right("LAT r/w", wide ? 14 : 0)
+        << utils::fit_right("READ", show_read ? 12 : 0)
+        << utils::fit_right("WRITE", show_write ? 12 : 0)
+        << utils::fit_right("IOPS r/w", show_iops ? 14 : 0)
+        << utils::fit_right("UTIL", show_util ? 8 : 0)
+        << utils::fit_right("LAT r/w", show_lat ? 14 : 0)
         << reset_color() << "\033[K\n";
 
     for (const auto& io : snap.disk_io) {
-        std::ostringstream iops;
-        iops << std::fixed << std::setprecision(0)
-             << io.read_ops_per_sec << "/" << io.write_ops_per_sec;
-
-        out << "  " << c_value() << utils::column(io.device, static_cast<size_t>(dev_w)) << reset_color()
-            << c_good()  << utils::fit_right(format_bytes_per_sec(io.read_bytes_per_sec), 12) << reset_color()
-            << c_warn()  << utils::fit_right(format_bytes_per_sec(io.write_bytes_per_sec), 12) << reset_color()
-            << c_dim()   << utils::fit_right(iops.str(), 14) << reset_color();
-        if (wide) {
+        out << "  " << c_value() << utils::column(io.device, static_cast<size_t>(dev_w)) << reset_color();
+        if (show_read) {
+            out << c_good() << utils::fit_right(format_bytes_per_sec(io.read_bytes_per_sec), 12) << reset_color();
+        }
+        if (show_write) {
+            out << c_warn() << utils::fit_right(format_bytes_per_sec(io.write_bytes_per_sec), 12) << reset_color();
+        }
+        if (show_iops) {
+            std::ostringstream iops;
+            iops << std::fixed << std::setprecision(0)
+                 << io.read_ops_per_sec << "/" << io.write_ops_per_sec;
+            out << c_dim() << utils::fit_right(iops.str(), 14) << reset_color();
+        }
+        if (show_util) {
+            out << c_dim() << utils::fit_right(utils::format_opt(io.util_percent, "%", 0), 8) << reset_color();
+        }
+        if (show_lat) {
             std::ostringstream lat;
             lat << utils::format_opt(io.avg_read_latency_ms, "", 1) << "/"
                 << utils::format_opt(io.avg_write_latency_ms, "ms", 1);
-            out << c_dim() << utils::fit_right(utils::format_opt(io.util_percent, "%", 0), 8)
-                << utils::fit_right(lat.str(), 14) << reset_color();
+            out << c_dim() << utils::fit_right(lat.str(), 14) << reset_color();
         }
         out << "\033[K\n";
     }
@@ -1432,26 +1578,40 @@ void TUI::render_disk_view(std::ostringstream& out, const Snapshot& snap, const 
                                  return total_of(*a) > total_of(*b);
                              });
 
-            const bool show_totals = width >= 96;
-            const int  name_w = std::max(10, std::min(30, width - (show_totals ? 62 : 38)));
+            int io_cols = 0;
+            const int name_w = std::min(30, flex_column(width, 2 + 7 + 2, {12, 12, 12, 12}, 8, &io_cols));
+            const bool proc_write  = io_cols >= 1;
+            const bool proc_read   = io_cols >= 2;
+            const bool proc_wtotal = io_cols >= 3;
+            const bool proc_rtotal = io_cols >= 4;
+
             out << c_dim() << "  " << utils::fit_right("PID", 7) << "  "
                 << utils::fit("COMMAND", static_cast<size_t>(name_w))
-                << utils::fit_right("READ/s", 12) << utils::fit_right("WRITE/s", 12)
-                << utils::fit_right("READ TOTAL", show_totals ? 12 : 0)
-                << utils::fit_right("WRITE TOTAL", show_totals ? 12 : 0)
+                << utils::fit_right("READ/s", proc_read ? 12 : 0)
+                << utils::fit_right("WRITE/s", proc_write ? 12 : 0)
+                << utils::fit_right("READ TOTAL", proc_rtotal ? 12 : 0)
+                << utils::fit_right("WRITE TOTAL", proc_wtotal ? 12 : 0)
                 << reset_color() << "\033[K\n";
 
             const int rows = cfg.detail_level >= DetailLevel::Detailed ? 10 : 5;
             for (int i = 0; i < rows && i < static_cast<int>(writers.size()); ++i) {
                 const ProcessStats& p = *writers[static_cast<size_t>(i)];
                 out << "  " << c_dim() << utils::fit_right(std::to_string(p.pid), 7) << reset_color()
-                    << "  " << c_value() << utils::column(p.name, static_cast<size_t>(name_w)) << reset_color()
-                    << c_good() << utils::fit_right(utils::format_opt_rate(p.io_read_bytes_per_sec), 12) << reset_color()
-                    << c_warn() << utils::fit_right(utils::format_opt_rate(p.io_write_bytes_per_sec), 12) << reset_color();
-                if (show_totals) {
-                    out << c_dim()
-                        << utils::fit_right(utils::format_opt_bytes(p.io_read_bytes_total), 12)
-                        << utils::fit_right(utils::format_opt_bytes(p.io_write_bytes_total), 12)
+                    << "  " << c_value() << utils::column(p.name, static_cast<size_t>(name_w)) << reset_color();
+                if (proc_read) {
+                    out << c_good() << utils::fit_right(utils::format_opt_rate(p.io_read_bytes_per_sec), 12)
+                        << reset_color();
+                }
+                if (proc_write) {
+                    out << c_warn() << utils::fit_right(utils::format_opt_rate(p.io_write_bytes_per_sec), 12)
+                        << reset_color();
+                }
+                if (proc_rtotal) {
+                    out << c_dim() << utils::fit_right(utils::format_opt_bytes(p.io_read_bytes_total), 12)
+                        << reset_color();
+                }
+                if (proc_wtotal) {
+                    out << c_dim() << utils::fit_right(utils::format_opt_bytes(p.io_write_bytes_total), 12)
                         << reset_color();
                 }
                 out << "\033[K\n";
@@ -1506,21 +1666,26 @@ void TUI::render_network_view(std::ostringstream& out, const Snapshot& snap, con
         shown.push_back(&n);
     }
 
-    // Margin, the two rate columns, the gap and the state flag are fixed; the
-    // interface name and its address share whatever is left, and the link
-    // speed is taken only when the row still fits with it.
-    const bool show_link = width >= 96;
-    int   net_remaining  = width - 2 /*margin*/ - 12 - 12 - 2 /*gap*/ - 6 /*state*/;
-    if (show_link) net_remaining -= 11;
+    // The interface name is what a row is useless without, so it is the last
+    // thing to shrink; the address, the two rates, the state and the link
+    // speed are given up in that order as the terminal narrows.
+    int net_columns = 0;
+    const int name_flex = flex_column(width, 2, {12, 12, 2 + 6, 11}, 6, &net_columns);
+    const bool show_rates = net_columns >= 2;
+    const bool show_state = net_columns >= 3;
+    const bool show_link  = net_columns >= 4;
 
-    const int name_w = std::max(6, std::min(16, net_remaining / 3));
-    const int addr_w = std::max(6, net_remaining - name_w);
+    // The name takes a third of the shared space, capped at 16, and never
+    // more than the space actually is; the address gets the remainder.
+    const int name_w = std::min(name_flex, std::min(16, std::max(6, name_flex / 3)));
+    const int addr_w = std::max(0, name_flex - name_w);
 
     out << c_dim() << "  " << utils::fit("INTERFACE", static_cast<size_t>(name_w))
         << utils::fit("ADDRESS", static_cast<size_t>(addr_w))
-        << utils::fit_right("RX", 12) << utils::fit_right("TX", 12)
+        << utils::fit_right("RX", show_rates ? 12 : 0)
+        << utils::fit_right("TX", show_rates ? 12 : 0)
         << utils::fit_right("LINK", show_link ? 11 : 0)
-        << "  " << utils::fit("STATE", 6)
+        << (show_state ? "  " : "") << utils::fit("STATE", show_state ? 6 : 0)
         << reset_color() << "\033[K\n";
 
     // The detailed level prints two extra lines under each interface, and the
@@ -1533,14 +1698,19 @@ void TUI::render_network_view(std::ostringstream& out, const Snapshot& snap, con
         const NetworkStats& n = *shown[static_cast<size_t>(i)];
         out << "  " << c_value() << utils::column(n.name, static_cast<size_t>(name_w)) << reset_color()
             << c_dim()  << utils::column(n.ip_address.empty() ? "-" : n.ip_address,
-                                         static_cast<size_t>(addr_w)) << reset_color()
-            << c_good() << utils::fit_right(format_bytes_per_sec(n.rx_bytes_per_sec), 12) << reset_color()
-            << c_warn() << utils::fit_right(format_bytes_per_sec(n.tx_bytes_per_sec), 12) << reset_color();
+                                         static_cast<size_t>(addr_w)) << reset_color();
+        if (show_rates) {
+            out << c_good() << utils::fit_right(format_bytes_per_sec(n.rx_bytes_per_sec), 12) << reset_color()
+                << c_warn() << utils::fit_right(format_bytes_per_sec(n.tx_bytes_per_sec), 12) << reset_color();
+        }
         if (show_link) {
             out << c_dim() << utils::fit_right(utils::format_opt(n.speed_mbps, "Mbps"), 11) << reset_color();
         }
-        out << "  " << (n.is_up ? c_good() : c_dim()) << utils::fit(n.is_up ? "up" : "down", 6)
-            << reset_color() << "\033[K\n";
+        if (show_state) {
+            out << "  " << (n.is_up ? c_good() : c_dim()) << utils::fit(n.is_up ? "up" : "down", 6)
+                << reset_color();
+        }
+        out << "\033[K\n";
 
         if (cfg.detail_level >= DetailLevel::Detailed) {
             std::ostringstream detail;
@@ -1615,20 +1785,19 @@ void TUI::render_connections_view(std::ostringstream& out, const Snapshot& snap,
 
     const std::vector<NetConnectionStats>& conns = snap.connections;
 
-    // Budget the row from the terminal outwards rather than from a table of
-    // guessed constants: margin, protocol and the gap are fixed, the optional
-    // columns are taken only while they fit, and the two addresses share what
-    // is left with the process name.
-    const bool show_state = width >= 52;
-    const bool show_pid   = width >= 100;
+    // Margin, protocol and the gap are fixed; state and PID are given up in
+    // that order; the two addresses and the process name share the rest, and
+    // all three shrink together so the row cannot exceed the terminal.
+    int conn_columns = 0;
+    const int shared = flex_column(width, 2 /*margin*/ + 7 /*protocol*/ + 2 /*gap*/,
+                                   {13 /*state*/, 8 /*pid*/}, 22, &conn_columns);
+    const bool show_state = conn_columns >= 1;
+    const bool show_pid   = conn_columns >= 2;
 
-    int remaining = width - 2 /*margin*/ - 7 /*protocol*/ - 2 /*gap*/;
-    if (show_state) remaining -= 13;
-    if (show_pid)   remaining -= 8;
-
-    const int proc_w = std::max(6, std::min(24, remaining / 5));
-    remaining -= proc_w;
-    const int addr_w = std::max(9, remaining / 2);
+    // Two addresses take two fifths each; the process name gets the remainder,
+    // and neither claims a minimum the terminal cannot pay.
+    const int addr_w = std::max(1, std::min(24, shared * 2 / 5));
+    const int proc_w = std::max(0, std::min(24, shared - 2 * addr_w));
 
     out << c_dim() << "  " << utils::fit("PROTO", 7)
         << utils::fit("LOCAL", static_cast<size_t>(addr_w))
@@ -1784,22 +1953,36 @@ void TUI::render_processes_view(std::ostringstream& out, const Snapshot& snap, c
         out << section_header(title.str(), width) << "\033[K\n";
     }
 
-    // Column budget, widest first: everything except the command name has a
-    // fixed width, so the name absorbs whatever is left.
-    const bool show_user = width >= 76;
-    const bool show_io   = width >= 108 && cfg.detail_level >= DetailLevel::Detailed;
-    const bool show_time = width >= 92;
+    // The command name is the one column a row is useless without, so it is
+    // the flexible one; the rest are given up in order of usefulness as the
+    // terminal narrows.  Only the detailed levels ask for the I/O column at
+    // all, which is why it is offered last.
+    const bool want_io = cfg.detail_level >= DetailLevel::Detailed;
+    int columns = 0;
+    const int name_w = std::min(36, flex_column(
+        width, 2 + 7 + 2 + 3 /* trailing "  S" */,
+        want_io ? std::initializer_list<int>{7, 11, 8, 6, 12, 10, 22}
+                : std::initializer_list<int>{7, 11, 8, 6, 12, 10},
+        8, &columns));
+
+    const bool show_cpu  = columns >= 1;
+    const bool show_rss  = columns >= 2;
+    const bool show_mem  = columns >= 3;
+    const bool show_thr  = columns >= 4;
+    const bool show_user = columns >= 5;
+    const bool show_time = columns >= 6;
+    const bool show_io   = want_io && columns >= 7;
     const int  user_w    = show_user ? 12 : 0;
-    const int  io_w      = show_io ? 22 : 0;
     const int  time_w    = show_time ? 10 : 0;
-    const int  fixed     = 2 + 7 + 2 + user_w + 7 + 8 + 11 + 6 + time_w + io_w + 4;
-    const int  name_w    = std::max(8, std::min(36, width - fixed));
+    const int  io_w      = show_io ? 22 : 0;
 
     out << c_dim() << "  " << utils::fit_right("PID", 7) << "  "
         << utils::fit("COMMAND", static_cast<size_t>(name_w))
         << utils::fit("USER", static_cast<size_t>(user_w))
-        << utils::fit_right("CPU%", 7) << utils::fit_right("MEM%", 8)
-        << utils::fit_right("RSS", 11) << utils::fit_right("THR", 6)
+        << utils::fit_right("CPU%", show_cpu ? 7 : 0)
+        << utils::fit_right("MEM%", show_mem ? 8 : 0)
+        << utils::fit_right("RSS", show_rss ? 11 : 0)
+        << utils::fit_right("THR", show_thr ? 6 : 0)
         << utils::fit_right("TIME", static_cast<size_t>(time_w))
         << (show_io ? utils::fit_right("DISK r/w", static_cast<size_t>(io_w)) : "")
         << "  S" << reset_color() << "\033[K\n";
@@ -1829,16 +2012,24 @@ void TUI::render_processes_view(std::ostringstream& out, const Snapshot& snap, c
             out << (selected ? "" : c_dim()) << utils::column(p.user, static_cast<size_t>(user_w))
                 << (selected ? "" : reset_color());
         }
-        out << (selected ? "" : usage_color(p.cpu_percent))
-            << utils::fit_right(utils::format_opt(std::optional<double>(p.cpu_percent), "", 1), 7)
-            << (selected ? "" : reset_color())
-            << (selected ? "" : usage_color(p.mem_percent))
-            << utils::fit_right(utils::format_opt(std::optional<double>(p.mem_percent), "", 1), 8)
-            << (selected ? "" : reset_color())
-            << (selected ? "" : c_value()) << utils::fit_right(format_bytes(p.mem_rss_bytes), 11)
-            << (selected ? "" : reset_color())
-            << (selected ? "" : c_dim()) << utils::fit_right(std::to_string(p.threads), 6)
-            << (selected ? "" : reset_color());
+        if (show_cpu) {
+            out << (selected ? "" : usage_color(p.cpu_percent))
+                << utils::fit_right(utils::format_opt(std::optional<double>(p.cpu_percent), "", 1), 7)
+                << (selected ? "" : reset_color());
+        }
+        if (show_mem) {
+            out << (selected ? "" : usage_color(p.mem_percent))
+                << utils::fit_right(utils::format_opt(std::optional<double>(p.mem_percent), "", 1), 8)
+                << (selected ? "" : reset_color());
+        }
+        if (show_rss) {
+            out << (selected ? "" : c_value()) << utils::fit_right(format_bytes(p.mem_rss_bytes), 11)
+                << (selected ? "" : reset_color());
+        }
+        if (show_thr) {
+            out << (selected ? "" : c_dim()) << utils::fit_right(std::to_string(p.threads), 6)
+                << (selected ? "" : reset_color());
+        }
         if (show_time) {
             out << (selected ? "" : c_dim())
                 << utils::fit_right(utils::format_duration_seconds(p.cpu_time_seconds),

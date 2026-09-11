@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <optional>
 #include <sstream>
+#include <vector>
 
 #if defined(SYSMON_POSIX)
 #  include <sys/types.h>
@@ -25,8 +27,10 @@
 #endif
 
 #if defined(SYSMON_MACOS)
+#  include <sys/sysctl.h>
 #  include <net/if_dl.h>
 #  include <net/if_media.h>
+#  include <net/if_mib.h>
 #  include <net/if_types.h>
 #endif
 
@@ -328,15 +332,67 @@ std::vector<NetworkStats> NetworkMonitor::read_linux() { return {}; }
 #endif
 
 // ---------------------------------------------------------------------------
-// macOS: getifaddrs() AF_LINK counters
+// macOS: getifaddrs() AF_LINK counters, with 64-bit totals from the route table
 // ---------------------------------------------------------------------------
 
 #if defined(SYSMON_MACOS)
+
+namespace {
+
+/// 64-bit byte and packet counters for one interface.
+struct LinkCounters64 {
+    uint64_t rx_bytes{0};
+    uint64_t tx_bytes{0};
+    uint64_t rx_packets{0};
+    uint64_t tx_packets{0};
+};
+
+/// Read the 64-bit interface counters the kernel keeps.
+///
+/// `struct if_data`, which getifaddrs() hands out, holds these as 32-bit
+/// fields: they wrap every 4 GB.  Measured on an interface that had received
+/// 52391874737 bytes, getifaddrs() reported 851857408 — the same number modulo
+/// 2^32, twelve wraps in.  Every total was wrong on any machine that had moved
+/// more than 4 GB, and each wrap also made the rate delta go negative, which
+/// the underflow guard turned into a silent zero.
+///
+/// The route table's NET_RT_IFLIST2 is not the fix: its `if_data64` carries
+/// the same truncated values.  The per-interface MIB under net.link.generic is
+/// what `netstat -ib` itself reads, and its counters are genuinely 64-bit
+/// (verified against netstat to the byte).
+std::map<std::string, LinkCounters64> read_link_counters64() {
+    std::map<std::string, LinkCounters64> result;
+
+    int    count = 0;
+    size_t len   = sizeof(count);
+    if (sysctlbyname("net.link.generic.system.ifcount", &count, &len, nullptr, 0) != 0) {
+        return result;
+    }
+
+    // Interface MIB rows are indexed from 1 and the table is dense.
+    for (int index = 1; index <= count; ++index) {
+        struct ifmibdata data{};
+        int mib[6] = {CTL_NET, PF_LINK, NETLINK_GENERIC, IFMIB_IFDATA, index, IFDATA_GENERAL};
+        len = sizeof(data);
+        if (sysctl(mib, 6, &data, &len, nullptr, 0) != 0) continue;
+        if (data.ifmd_name[0] == '\0') continue;
+
+        LinkCounters64& c = result[std::string(data.ifmd_name)];
+        c.rx_bytes   = data.ifmd_data.ifi_ibytes;
+        c.tx_bytes   = data.ifmd_data.ifi_obytes;
+        c.rx_packets = data.ifmd_data.ifi_ipackets;
+        c.tx_packets = data.ifmd_data.ifi_opackets;
+    }
+    return result;
+}
+
+} // namespace
 
 std::vector<NetworkStats> NetworkMonitor::read_macos() {
     struct ifaddrs* addrs = nullptr;
     if (getifaddrs(&addrs) != 0) return {};
 
+    const std::map<std::string, LinkCounters64> wide = read_link_counters64();
     std::vector<NetworkStats> result;
 
     for (struct ifaddrs* ifa = addrs; ifa != nullptr; ifa = ifa->ifa_next) {
@@ -348,10 +404,21 @@ std::vector<NetworkStats> NetworkMonitor::read_macos() {
 
         NetworkStats ns;
         ns.name             = ifa->ifa_name;
-        ns.rx_bytes_total   = data->ifi_ibytes;
-        ns.tx_bytes_total   = data->ifi_obytes;
-        ns.rx_packets_total = data->ifi_ipackets;
-        ns.tx_packets_total = data->ifi_opackets;
+
+        // Prefer the route table's 64-bit counters; if_data's are 32 bits and
+        // wrap every 4 GB.  The narrow ones remain the fallback so an
+        // interface missing from the route table still reports something.
+        if (const auto it = wide.find(ns.name); it != wide.end()) {
+            ns.rx_bytes_total   = it->second.rx_bytes;
+            ns.tx_bytes_total   = it->second.tx_bytes;
+            ns.rx_packets_total = it->second.rx_packets;
+            ns.tx_packets_total = it->second.tx_packets;
+        } else {
+            ns.rx_bytes_total   = data->ifi_ibytes;
+            ns.tx_bytes_total   = data->ifi_obytes;
+            ns.rx_packets_total = data->ifi_ipackets;
+            ns.tx_packets_total = data->ifi_opackets;
+        }
         ns.rx_errors        = data->ifi_ierrors;
         ns.tx_errors        = data->ifi_oerrors;
         ns.rx_dropped       = data->ifi_iqdrops;

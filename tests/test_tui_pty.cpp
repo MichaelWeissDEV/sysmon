@@ -180,7 +180,85 @@ std::string strip_escapes(const std::string& frame) {
 std::string last_frame(const std::string& output) {
     const size_t last = output.rfind("\033[H");
     if (last == std::string::npos) return "";
+
+    // The run ends with SIGKILL, which can land in the middle of a write, so
+    // the final piece may be a partial frame.  Prefer the one before it, which
+    // is bounded by the next frame's cursor-home and therefore complete.
+    const size_t previous = output.rfind("\033[H", last - 1);
+    if (previous != std::string::npos && last > 0) {
+        return strip_escapes(output.substr(previous, last - previous));
+    }
     return strip_escapes(output.substr(last));
+}
+
+/// Every complete frame in a capture, escape-stripped.
+///
+/// Checking each frame rather than only the last is both stronger and cheaper:
+/// one pty run can visit every view in turn, and a layout that overflowed only
+/// while passing through no longer escapes notice.
+std::vector<std::string> all_frames(const std::string& output) {
+    std::vector<std::string> result;
+    size_t pos = output.find("\033[H");
+    while (pos != std::string::npos) {
+        const size_t next = output.find("\033[H", pos + 1);
+        if (next == std::string::npos) break;   // may be a partial final frame
+        result.push_back(strip_escapes(output.substr(pos, next - pos)));
+        pos = next;
+    }
+    return result;
+}
+
+/// Display width of one line: a UTF-8 lead byte is one column, a continuation
+/// byte is none, which is what the box-drawing and arrow glyphs need.
+size_t line_width(const std::string& line) {
+    size_t width = 0;
+    for (char c : line) {
+        if ((static_cast<unsigned char>(c) & 0xC0) == 0x80) continue;
+        ++width;
+    }
+    return width;
+}
+
+/// Widest line and tallest frame across every complete frame of a capture.
+void measure_all(const std::string& output, size_t* widest, int* tallest,
+                 std::string* worst_line) {
+    *widest  = 0;
+    *tallest = 0;
+    if (worst_line != nullptr) worst_line->clear();
+
+    for (const std::string& frame : all_frames(output)) {
+        int rows = 0;
+        size_t start = 0;
+        while (start <= frame.size()) {
+            const size_t end  = frame.find('\n', start);
+            const std::string line = frame.substr(start, end == std::string::npos
+                                                          ? std::string::npos
+                                                          : end - start);
+            const size_t width = line_width(line);
+            if (width > *widest) {
+                *widest = width;
+                if (worst_line != nullptr) *worst_line = line;
+            }
+            if (end == std::string::npos) break;
+            ++rows;
+            start = end + 1;
+        }
+        if (rows > *tallest) *tallest = rows;
+    }
+}
+
+/// Painted rows of the last complete frame.
+///
+/// A frame taller than the terminal makes the terminal *scroll*, which moves
+/// every later frame's cursor-home to the wrong row and tears the display
+/// apart — invisible to a width-only check.
+int frame_height(const std::string& output) {
+    const std::string frame = last_frame(output);
+    if (frame.empty()) return 0;
+    int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n'));
+    // The final newline ends the last painted row rather than starting a new
+    // one, so it is already counted correctly by counting newlines.
+    return rows;
 }
 
 /// The widest line of the last complete frame, in display columns.
@@ -236,46 +314,60 @@ TEST(TuiPtyTest, ArrowKeysDoNotQuitTheDashboard) {
 }
 
 TEST(TuiPtyTest, EveryFocusViewRendersWithinTheTerminalWidth) {
-    // Each view is its own layout, so each one can overflow on its own.
-    struct Case { const char* key; const char* marker; };
-    static const Case cases[] = {
-        {"1", "Processor"},   {"2", "Physical memory"}, {"3", "GPU"},
-        {"4", "Filesystems"}, {"5", "Interfaces"},      {"6", "PROTO"},
-        {"7", "COMMAND"},     {"8", "Sensors"},
+    // Each view is its own layout and can overflow on its own, but they do not
+    // need a process each: one run visits all eight, and every frame it
+    // painted along the way is checked — which catches a view that overflowed
+    // only while being passed through.
+    static const char* markers[] = {
+        "Processor", "Physical memory", "GPU", "Filesystems",
+        "Interfaces", "PROTO", "COMMAND", "Sensors",
     };
 
-    for (const auto& c : cases) {
-        for (int columns : {60, 100, 150}) {
-            const PtyRun run = run_in_pty({"--interval", "1"}, columns, 45, 2.5,
-                                          {{1.0, c.key}});
-            ASSERT_FALSE(run.output.empty())
-                << "no output for view " << c.key << " at " << columns << " columns";
+    for (int columns : {60, 100, 150}) {
+        const PtyRun run = run_in_pty(
+            {"--interval", "1"}, columns, 45, 7.0,
+            {{1.0, "1"}, {1.6, "2"}, {2.2, "3"}, {2.8, "4"},
+             {3.4, "5"}, {4.0, "6"}, {4.6, "7"}, {5.2, "8"}});
+        ASSERT_FALSE(run.output.empty()) << "no output at " << columns << " columns";
 
-            int worst = -1;
-            EXPECT_LE(widest_line(run.output, &worst), static_cast<size_t>(columns))
-                << "view " << c.key << " overflows line " << worst
-                << " at " << columns << " columns";
+        size_t widest = 0;
+        int tallest = 0;
+        std::string worst;
+        measure_all(run.output, &widest, &tallest, &worst);
+        EXPECT_LE(widest, static_cast<size_t>(columns))
+            << "a frame overflowed a " << columns << "-column terminal:\n|" << worst << "|";
+        EXPECT_LE(tallest, 45) << "a frame was taller than the terminal";
 
-            EXPECT_NE(last_frame(run.output).find(c.marker), std::string::npos)
-                << "view " << c.key << " was not the frame on screen (expected "
-                << c.marker << ")";
+        // Each view has to have actually been on screen at some point.
+        const std::vector<std::string> frames = all_frames(run.output);
+        for (const char* marker : markers) {
+            const bool seen = std::any_of(frames.begin(), frames.end(),
+                                          [&](const std::string& f) {
+                                              return f.find(marker) != std::string::npos;
+                                          });
+            EXPECT_TRUE(seen) << "no frame ever showed " << marker
+                              << " at " << columns << " columns";
         }
     }
 }
 
 TEST(TuiPtyTest, DensityLadderRendersWithinTheTerminalWidth) {
     // The detailed levels print columns the normal layout leaves out, which is
-    // exactly where a width budget stops adding up.
-    for (const char* keys : {"+", "++", "+++", "-", "--", "m"}) {
-        for (int columns : {60, 110}) {
-            const PtyRun run = run_in_pty({"--interval", "1"}, columns, 45, 2.5,
-                                          {{1.0, keys}});
-            ASSERT_FALSE(run.output.empty());
-            int worst = -1;
-            EXPECT_LE(widest_line(run.output, &worst), static_cast<size_t>(columns))
-                << "density '" << keys << "' overflows line " << worst
-                << " at " << columns << " columns";
-        }
+    // exactly where a width budget stops adding up.  One run walks the whole
+    // ladder up and back down; every frame on the way is checked.
+    for (int columns : {60, 110}) {
+        const PtyRun run = run_in_pty({"--interval", "1"}, columns, 45, 5.0,
+                                      {{1.0, "+"}, {1.6, "+"}, {2.2, "+"},
+                                       {2.8, "-"}, {3.4, "-"}, {4.0, "m"}});
+        ASSERT_FALSE(run.output.empty());
+
+        size_t widest = 0;
+        int tallest = 0;
+        std::string worst;
+        measure_all(run.output, &widest, &tallest, &worst);
+        EXPECT_LE(widest, static_cast<size_t>(columns))
+            << "a density level overflowed " << columns << " columns:\n|" << worst << "|";
+        EXPECT_LE(tallest, 45);
     }
 }
 
@@ -294,7 +386,7 @@ TEST(TuiPtyTest, DetailedProcessViewRendersWithinTheTerminalWidth) {
 }
 
 TEST(TuiPtyTest, ViewBarMarksTheActiveView) {
-    const PtyRun run = run_in_pty({"--interval", "1"}, 120, 40, 2.5, {{1.0, "5"}});
+    const PtyRun run = run_in_pty({"--interval", "1"}, 120, 40, 3.5, {{1.0, "5"}});
     const std::string plain = last_frame(run.output);
     // The strip names every view it could fit, so the bar itself is the proof
     // that a focus view is on screen.
@@ -305,7 +397,10 @@ TEST(TuiPtyTest, ViewBarMarksTheActiveView) {
 TEST(TuiPtyTest, EscapeLeavesAFocusViewBeforeItQuits) {
     // Escape is "back": out of a focus view first, out of the program only
     // from the overview, so a mistyped view change is not a quit.
-    const PtyRun run = run_in_pty({"--interval", "1"}, 110, 40, 3.0,
+    // Runs well past the last keystroke: last_frame() deliberately takes the
+    // frame *before* the final one, since a SIGKILL can cut the final write
+    // short, so the state under test needs a whole frame painted after it.
+    const PtyRun run = run_in_pty({"--interval", "1"}, 110, 40, 4.5,
                                   {{1.0, "7"}, {1.8, "\033"}});
     const std::string plain = last_frame(run.output);
     EXPECT_NE(plain.find("Load Average"), std::string::npos)
@@ -314,7 +409,7 @@ TEST(TuiPtyTest, EscapeLeavesAFocusViewBeforeItQuits) {
 }
 
 TEST(TuiPtyTest, ProcessInspectorOpensOnTheSelectedProcess) {
-    const PtyRun run = run_in_pty({"--interval", "1"}, 120, 45, 3.5,
+    const PtyRun run = run_in_pty({"--interval", "1"}, 120, 45, 5.0,
                                   {{1.0, "7"}, {1.5, "\033[B\033[B"}, {2.2, "\r"}});
     const std::string plain = last_frame(run.output);
     EXPECT_NE(plain.find("Resources"), std::string::npos)
@@ -324,10 +419,103 @@ TEST(TuiPtyTest, ProcessInspectorOpensOnTheSelectedProcess) {
 }
 
 TEST(TuiPtyTest, StartViewFlagOpensThatViewImmediately) {
-    const PtyRun run = run_in_pty({"--interval", "1", "--view", "memory"}, 110, 40, 2.0);
+    const PtyRun run = run_in_pty({"--interval", "1", "--view", "memory"}, 110, 40, 3.0);
     const std::string plain = last_frame(run.output);
     EXPECT_NE(plain.find("Physical memory"), std::string::npos);
     EXPECT_NE(plain.find("Swap & paging"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Extreme geometry
+// ---------------------------------------------------------------------------
+
+TEST(TuiPtyTest, FramesNeverExceedTheTerminalHeight) {
+    // Vertical overflow is as destructive as horizontal and was invisible to
+    // every check here until now: the fixed content of a view is printed
+    // whatever the height, so a 15-row terminal used to receive a 46-row frame.
+    struct Geometry { int cols; int rows; };
+    static constexpr Geometry geometries[] = {{40, 15}, {80, 24}, {120, 40}};
+
+    for (const auto& g : geometries) {
+        const PtyRun run = run_in_pty({"--interval", "1"}, g.cols, g.rows, 5.0,
+                                      {{1.0, "+++"}, {1.6, "2"}, {2.4, "4"},
+                                       {3.2, "7"}, {4.0, "0"}});
+        ASSERT_FALSE(run.output.empty())
+            << "no output at " << g.cols << "x" << g.rows;
+
+        size_t widest = 0;
+        int tallest = 0;
+        std::string worst;
+        measure_all(run.output, &widest, &tallest, &worst);
+
+        EXPECT_LE(tallest, g.rows)
+            << "a frame was taller than a " << g.cols << "x" << g.rows << " terminal";
+        EXPECT_LE(widest, static_cast<size_t>(g.cols))
+            << "a frame overflowed " << g.cols << " columns:\n|" << worst << "|";
+    }
+}
+
+TEST(TuiPtyTest, VeryNarrowTerminalsStillRenderSomething) {
+    // Below 55 columns five separate tables used to overflow, each because a
+    // fixed cost plus a flexible column's own minimum added up past the
+    // terminal.  20x5 is the floor worth supporting: a split pane.
+    for (int columns : {20, 30}) {
+        const PtyRun run = run_in_pty({"--interval", "1"}, columns, 8, 2.5, {{1.0, "7"}});
+        ASSERT_FALSE(run.output.empty()) << "no output at " << columns << " columns";
+
+        int worst = -1;
+        EXPECT_LE(widest_line(run.output, &worst), static_cast<size_t>(columns))
+            << "line " << worst << " overflows a " << columns << "-column terminal";
+        EXPECT_LE(frame_height(run.output), 8);
+
+        // Still useful, not merely non-overflowing: a PID has to survive.
+        EXPECT_NE(last_frame(run.output).find("PID"), std::string::npos)
+            << "nothing recognisable rendered at " << columns << " columns";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial key input
+// ---------------------------------------------------------------------------
+
+TEST(TuiPtyTest, PartialEscapeSequenceDoesNotQuit) {
+    // A terminal can emit an escape sequence that the decoder never sees the
+    // end of.  Both timeout branches fall back to Key::Escape, and Escape in
+    // the overview quits — so a truncated sequence would kill the dashboard.
+    const PtyRun run = run_in_pty({"--interval", "1"}, 100, 30, 4.0,
+                                  {{1.0, "7"},          // leave the overview first
+                                   {1.5, "\033["},      // CSI with no final byte
+                                   {2.2, "\033[1;"},    // parameters, then nothing
+                                   {2.9, "\033O"}});    // SS3 with no final byte
+
+    EXPECT_GE(run.frames, 3) << "the dashboard stopped painting after a partial sequence";
+    EXPECT_GT(run.output.size(), 15000u);
+}
+
+TEST(TuiPtyTest, RapidKeyInputIsSurvivable) {
+    // Everything at once: view changes, density changes, paging and a
+    // selection, typed faster than the refresh interval.
+    const PtyRun run = run_in_pty({"--interval", "1"}, 110, 35, 4.0,
+                                  {{1.0, "12345678707"},
+                                   {1.4, "+++---+"},
+                                   {1.8, "\033[B\033[B\033[B\033[A\033[6~\033[5~"},
+                                   {2.2, "\033[F\033[H"},
+                                   {2.6, "aa"},
+                                   {3.0, "\r"}});
+
+    EXPECT_GE(run.frames, 3) << "the dashboard stopped painting under rapid input";
+    int worst = -1;
+    EXPECT_LE(widest_line(run.output, &worst), 110u)
+        << "line " << worst << " overflowed after rapid input";
+}
+
+TEST(TuiPtyTest, UnboundKeysAreIgnored) {
+    // An unbound key must not repaint, quit, or corrupt the view.
+    const PtyRun run = run_in_pty({"--interval", "1"}, 100, 30, 4.0,
+                                  {{1.0, "5"}, {1.6, "xyzXYZ!@#$%^&*()"}});
+    EXPECT_GE(run.frames, 2);
+    EXPECT_NE(last_frame(run.output).find("Interfaces"), std::string::npos)
+        << "unbound keys changed the view";
 }
 
 #else
